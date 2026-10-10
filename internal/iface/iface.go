@@ -23,6 +23,7 @@ import (
 	"github.com/wyattanderson/pve-imds/internal/identity"
 	"github.com/wyattanderson/pve-imds/internal/imds"
 	"github.com/wyattanderson/pve-imds/internal/imds/jwtsvid"
+	"github.com/wyattanderson/pve-imds/internal/imds/nocloud"
 	"github.com/wyattanderson/pve-imds/internal/manager"
 	"github.com/wyattanderson/pve-imds/internal/xdp"
 )
@@ -56,21 +57,23 @@ type Runtime struct {
 	resolver *identity.Resolver
 	server   imds.Server
 	signer   *jwtsvid.Signer
-	ifindex  int32  // primary identifier
-	name     string // for logging/debugging only
+	nocloud  *nocloud.Server // nil when the NoCloud endpoint is disabled
+	ifindex  int32           // primary identifier
+	name     string          // for logging/debugging only
 }
 
-// New constructs a Runtime for the given tap interface.
-func New(log *slog.Logger, resolver *identity.Resolver, server imds.Server, signer *jwtsvid.Signer, ifindex int32, name string) *Runtime {
-	return &Runtime{log: log, resolver: resolver, server: server, signer: signer, ifindex: ifindex, name: name}
+// New constructs a Runtime for the given tap interface. noCloud may be nil
+// to disable the NoCloud endpoint.
+func New(log *slog.Logger, resolver *identity.Resolver, server imds.Server, signer *jwtsvid.Signer, noCloud *nocloud.Server, ifindex int32, name string) *Runtime {
+	return &Runtime{log: log, resolver: resolver, server: server, signer: signer, nocloud: noCloud, ifindex: ifindex, name: name}
 }
 
 // NewFactory returns a manager.RuntimeFactory that constructs a Runtime for
 // each tap interface, sharing the provided logger, identity resolver, IMDS
-// server, and JWT-SVID signer.
-func NewFactory(log *slog.Logger, resolver *identity.Resolver, server imds.Server, signer *jwtsvid.Signer) manager.RuntimeFactory {
+// server, JWT-SVID signer, and NoCloud server (nil when disabled).
+func NewFactory(log *slog.Logger, resolver *identity.Resolver, server imds.Server, signer *jwtsvid.Signer, noCloud *nocloud.Server) manager.RuntimeFactory {
 	return func(ifindex int32, name string) manager.InterfaceRuntime {
-		return New(log, resolver, server, signer, ifindex, name)
+		return New(log, resolver, server, signer, noCloud, ifindex, name)
 	}
 }
 
@@ -129,6 +132,11 @@ func (r *Runtime) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /pve-imds/jwtsvid", jwtsvid.NewIssueHandler(r.signer, r.resolver, r.name, r.ifindex))
 	mux.HandleFunc("GET /.well-known/jwks.json", jwtsvid.NewJWKSHandler(r.signer.NodesDir(), log))
+	if r.nocloud != nil {
+		nc := r.nocloud.NewHandler(r.resolver, r.name, r.ifindex)
+		mux.Handle(nocloud.Prefix, nc)
+		mux.Handle(nocloud.Prefix+"/", nc)
+	}
 	mux.Handle("/", base)
 
 	// handlerLabel is a promhttp option that reads the matched mux pattern from

@@ -11,7 +11,7 @@ description = "Run unit tests"
 run = "go test -race ./..."
 
 [tasks.test-conformance]
-description = "Run EC2 IMDS conformance suite (set CLOUD_INIT_DIR to override path)"
+description = "Run the EC2, OpenStack and NoCloud IMDS conformance suites (set CLOUD_INIT_DIR to override path)"
 dir = "tests/conformance"
 run = """
 PYTHONPATH=${CLOUD_INIT_DIR:-$HOME/git/cloud-init} uv run --project . pytest -v --tb=short .

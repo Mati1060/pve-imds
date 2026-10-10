@@ -42,6 +42,9 @@ nfpms:
       service for virtual machines running in Proxmox.
     formats:
       - deb
+    dependencies:
+      # postinstall.sh creates the pve-imds-token group with addgroup.
+      - adduser
     suggests:
       - proxmox-ve
     bindir: /usr/sbin

@@ -21,6 +21,7 @@ package openstack
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -35,12 +36,14 @@ const versionListing = "latest\n"
 // cloud-init does not require this listing, but it is useful for debugging.
 const fileListing = "meta_data.json\nnetwork_data.json\nuser_data\nvendor_data.json\nvendor_data2.json\n"
 
-type server struct{}
+type server struct {
+	userData imds.UserDataProvider
+}
 
 // NewServer returns an [imds.Server] that serves OpenStack Nova-compatible
-// IMDS responses.
-func NewServer() imds.Server {
-	return &server{}
+// IMDS responses. User data is obtained from userData.
+func NewServer(userData imds.UserDataProvider) imds.Server {
+	return &server{userData: userData}
 }
 
 // NewHandler implements [imds.Server]. It returns an http.Handler that routes
@@ -90,13 +93,13 @@ func (s *server) NewHandler(resolver imds.Resolver, name string, ifindex int32) 
 
 		case 3:
 			// GET /openstack/{version}/{file}
-			serveFile(w, req, rec, parts[2])
+			s.serveFile(w, req, rec, parts[2])
 		}
 	})
 }
 
 // serveFile dispatches a /openstack/{version}/{file} request.
-func serveFile(w http.ResponseWriter, req *http.Request, rec *identity.VMRecord, file string) {
+func (s *server) serveFile(w http.ResponseWriter, req *http.Request, rec *identity.VMRecord, file string) {
 	switch file {
 	case "meta_data.json":
 		serveJSON(w, MetadataFromRecord(rec))
@@ -105,9 +108,13 @@ func serveFile(w http.ResponseWriter, req *http.Request, rec *identity.VMRecord,
 		serveJSON(w, networkDataFromRecord(rec))
 
 	case "user_data":
-		userData, ok := imds.ParseUserData(rec.Config.Description)
-		if !ok {
+		userData, err := s.userData.UserData(req.Context(), rec)
+		switch {
+		case errors.Is(err, imds.ErrNoUserData):
 			http.NotFound(w, req)
+			return
+		case err != nil:
+			imds.WriteUserDataUnavailable(w)
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")

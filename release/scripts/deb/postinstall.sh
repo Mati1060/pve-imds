@@ -6,6 +6,13 @@ set -e
 case "$1" in
     configure)
 
+        # Group that may read the OpenBao token file used for templated
+        # user-data (see secrets.token_file). The service unit references it,
+        # so it must exist before the service is (re)started below.
+        if ! getent group pve-imds-token >/dev/null; then
+            addgroup --system pve-imds-token >/dev/null
+        fi
+
         # The following line should be removed in trixie or trixie+1
         deb-systemd-helper unmask 'pve-imds.service' >/dev/null || true
 

@@ -140,3 +140,80 @@ func TestParseUserData_ContainsClosingTag_CoexistsWithNetworkConfig(t *testing.T
 	require.True(t, ok)
 	assert.Equal(t, "net0:\n  type: ipv4", nc)
 }
+
+// ---------------------------------------------------------------------------
+// ParseUserDataBlock
+// ---------------------------------------------------------------------------
+
+func TestParseUserDataBlock_Legacy(t *testing.T) {
+	// Without secrets= the block parses exactly as ParseUserData does.
+	descs := []string{
+		"<!--#user-data\n#cloud-config\nusers:\n  - default\n-->\nother text",
+		"<!--#user-data\n# yaml comment --> still user-data\nruncmd: []\n-->\nignored",
+		"human-readable summary\n\n<!--#user-data\n#cloud-config\n-->",
+		"<!--#user-data #cloud-config\nruncmd: []\n-->",
+		"<!--#user-data\nsecrets=worker\nmachine: {}\n-->",
+		"<!--#user-datasecrets=worker\nmachine: {}\n-->",
+		"<!--#user-data secrets=worker other=1\nmachine: {}\n-->",
+	}
+	for _, desc := range descs {
+		want, ok := ParseUserData(desc)
+		require.True(t, ok, desc)
+		blk, ok := ParseUserDataBlock(desc)
+		require.True(t, ok, desc)
+		assert.False(t, blk.Templated, desc)
+		assert.Empty(t, blk.SecretSet, desc)
+		assert.Equal(t, want, blk.Content, desc)
+	}
+}
+
+func TestParseUserDataBlock_Secrets(t *testing.T) {
+	desc := "<!--#user-data secrets=worker\nversion: v1alpha1\ntoken: {{ secret \"token\" }}\n---\nkind: Foo\n-->\nnotes"
+	blk, ok := ParseUserDataBlock(desc)
+	require.True(t, ok)
+	assert.True(t, blk.Templated)
+	assert.Equal(t, "worker", blk.SecretSet)
+	assert.Equal(t, "version: v1alpha1\ntoken: {{ secret \"token\" }}\n---\nkind: Foo", blk.Content)
+}
+
+func TestParseUserDataBlock_SecretsWhitespaceAndCRLF(t *testing.T) {
+	desc := "<!--#user-data \t secrets=worker  \r\nmachine: {}\r\n-->"
+	blk, ok := ParseUserDataBlock(desc)
+	require.True(t, ok)
+	assert.True(t, blk.Templated)
+	assert.Equal(t, "worker", blk.SecretSet)
+	assert.Equal(t, "machine: {}", blk.Content)
+}
+
+func TestParseUserDataBlock_InvalidSetNameStillTemplated(t *testing.T) {
+	// The raw value is returned unvalidated so that the caller can reject it
+	// (fail closed) instead of serving the template as plain user-data.
+	for _, set := range []string{"", "../other", "a/b", "x%2Fy"} {
+		blk, ok := ParseUserDataBlock("<!--#user-data secrets=" + set + "\nmachine: {}\n-->")
+		require.True(t, ok, set)
+		assert.True(t, blk.Templated, set)
+		assert.Equal(t, set, blk.SecretSet)
+	}
+}
+
+func TestParseUserDataBlock_SecretsEmptyBody(t *testing.T) {
+	_, ok := ParseUserDataBlock("<!--#user-data secrets=worker\n   \n-->")
+	assert.False(t, ok)
+}
+
+func TestParseUserDataBlock_NoBlock(t *testing.T) {
+	_, ok := ParseUserDataBlock("plain notes")
+	assert.False(t, ok)
+	_, ok = ParseUserDataBlock("<!--#user-data secrets=worker\nmachine: {}\n")
+	assert.False(t, ok)
+}
+
+func TestParseUserDataBlock_FollowedByNetworkConfig(t *testing.T) {
+	desc := "<!--#user-data secrets=worker\nmachine: {}\n-->\n<!--#network-config\nnetwork:\n  version: 2\n-->"
+	blk, ok := ParseUserDataBlock(desc)
+	require.True(t, ok)
+	assert.Equal(t, "machine: {}", blk.Content)
+	nc, ok := ParseNetworkConfig(desc)
+	require.True(t, ok)
+	assert.Equal(t, "network:\n  version: 2", nc)
+}

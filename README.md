@@ -1,6 +1,6 @@
 # pve-imds
 
-An OpenStack and EC2 IMDS (Instance Metadata Service) compatible metadata service for virtual machines running in Proxmox.
+An OpenStack, EC2 and NoCloud IMDS (Instance Metadata Service) compatible metadata service for virtual machines running in Proxmox.
 
 With `pve-imds`, an unmodified Linux [cloud image](https://cloud-images.ubuntu.com/) running [cloud-init](https://docs.cloud-init.io/en/latest/explanation/introduction.html) can reach `http://169.254.169.254` to retrieve not only instance metadata but also **custom [user data](https://docs.cloud-init.io/en/latest/explanation/format/index.html)** stored in the Proxmox VM *Notes* field. `pve-imds` also supports a **signed identity document** that a VM can use to authenticate to a service like Vault.
 
@@ -117,6 +117,137 @@ When decoded, a token contains these claims:
 ```
 
 A relying party can verify the signature of this token using the JWKS endpoint at `http://169.254.169.254/.well-known/jwks.json`. Rather than managing its own signing keys, `pve-imds` uses Proxmox's PKI. Tokens are signed using the node's private key, and the public keys of all nodes in the cluster are made available via the JWKS endpoint.
+
+## NoCloud datasource
+
+`pve-imds` also serves the cloud-init [NoCloud](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html) datasource over HTTP under `http://169.254.169.254/nocloud/`, for every VM and regardless of the `emulate` setting. This is what lets [Talos Linux](https://www.talos.dev/) `nocloud` images, which support SecureBoot (unlike the Talos OpenStack image), and any cloud-init image provision from `pve-imds`.
+
+| Path | Response |
+|---|---|
+| `/nocloud/` (or `/nocloud`) | List of the files below |
+| `/nocloud/meta-data` | YAML with `instance-id` (the SMBIOS UUID, falling back to the VMID) and `local-hostname` (the VM name) |
+| `/nocloud/user-data` | The same user data as the OpenStack and EC2 endpoints, after [templating](#templated-user-data-with-openbao-secrets). Empty (200) when the VM has none |
+| `/nocloud/vendor-data` | Empty |
+| `/nocloud/network-config` | The VM's `<!--#network-config` Notes block as written (v1 or v2, with or without the top-level `network:` key), or, without one, DHCPv4 on every NIC matched by MAC address |
+
+Missing user-data is an empty 200 rather than a 404 because cloud-init's NoCloud datasource fails on a 404, while both cloud-init and Talos treat an empty body as "no user-data". `network-config` is always served because Talos retries a 404 for several minutes and only applies the hostname when it receives a network config.
+
+To point a VM at it, set its SMBIOS serial number. Proxmox only accepts base64 in the `serial` field, so encode it and add `base64=1`. `qm set --smbios1` replaces the whole `smbios1` value, so keep the VM's existing UUID:
+
+```bash
+VMID=123
+UUID=$(qm config $VMID | sed -n 's/^smbios1:.*uuid=\([^,]*\).*/\1/p')
+SERIAL='ds=nocloud-net;s=http://169.254.169.254/nocloud/;h=talos-worker-1'
+qm set $VMID --smbios1 "uuid=$UUID,serial=$(echo -n "$SERIAL" | base64 -w0),base64=1"
+```
+
+`h=` is optional; when set, it overrides the hostname from `meta-data`. The trailing `/` on the seed URL matters for older cloud-init releases; Talos and cloud-init 23.1+ add it if it is missing.
+
+With Talos, a VM without user-data gets its hostname and boots into maintenance mode, ready for `talosctl apply-config`. A VM with a machine config in its Notes boots straight into it. To keep the secrets in that config out of Notes, use templated user-data.
+
+Set `nocloud.enabled: false` to disable the endpoint.
+
+## Templated user-data with OpenBao secrets
+
+Notes are readable by anyone with `VM.Audit` on the VM and are included in backups, so they are not a good place for secrets such as a Talos machine config's tokens and keys. Instead, user data can contain placeholders that `pve-imds` fills in from an [OpenBao](https://openbao.org/) (or Vault) KV v2 secrets engine when the VM fetches it:
+
+```
+<!--#user-data secrets=worker
+version: v1alpha1
+machine:
+  type: worker
+  token: {{ secret "machine_token" }}
+  ca:
+    crt: {{ secret "machine_ca_crt" }}
+cluster:
+  token: {{ secret "cluster_token" }}
+  # ...the rest of your worker config...
+-->
+```
+
+- `secrets=<set>` on the opening line names the **secret set**. Without it, user data is served exactly as written and no placeholders are processed, so cloud-init Jinja templates are unaffected. The attribute must be on the same line as `<!--#user-data`.
+- The set is read from the KV path `kv/data/pve-imds/pools/{pool}/{name}`, where `{name}` is the set name and `{pool}` is the VM's Proxmox [resource pool](https://pve.proxmox.com/wiki/User_Management#pveum_pools). The pool is read from Proxmox (`/etc/pve/user.cfg`), never from anything the VM controls. Nested pools (`parent/child`) become nested paths.
+- `{{ secret "<field>" }}` is replaced with that field of the set. Whitespace inside the braces is allowed. Nothing else is interpreted: other `{{ ... }}` text is left as is, and values are inserted verbatim, so quote or indent them as your format requires (Talos expects base64 for certificates and keys, which keeps them on one line).
+- Set names may contain only letters, digits, `-` and `_` (up to 64 characters).
+- Templated user-data applies to the NoCloud, OpenStack and EC2 user-data endpoints alike.
+- The Notes field is limited to 8 KiB by Proxmox, which comfortably fits a worker config without its secrets.
+
+For the example above, in pool `k8s-dmz-01`:
+
+```bash
+bao kv put kv/pve-imds/pools/k8s-dmz-01/worker \
+    machine_token=... machine_ca_crt=... cluster_token=...
+```
+
+### Failure behaviour
+
+Rendering fails closed. The user-data endpoints return `503 Service Unavailable` with a `Retry-After` header, never a partially rendered or unrendered config, when:
+
+- OpenBao is unreachable, returns an error, or rejects the token,
+- the secret set or a referenced field doesn't exist (only string fields are used),
+- the set name is invalid,
+- the VM is not in a pool, or
+- the Notes use `secrets=` but `secrets.enabled` is off.
+
+cloud-init honours `Retry-After`; Talos keeps retrying until it gets the config rather than falling into maintenance mode. `pve-imds` logs the VMID, pool, set name and outcome of every templated request, never user-data or secret values.
+
+### Security model
+
+- **Secrets are bound to the VM's pool.** A VM can only ever receive secrets from its own pool's prefix, whatever its Notes contain, so Proxmox pool permissions decide who can give a VM access to which secrets. Anyone who can move a VM into a pool, or edit the Notes of a VM in a pool, can obtain that pool's secrets through the VM.
+- **Keep secrets out of Notes.** Notes are visible to `VM.Audit` and included in backups; set names and placeholders are not sensitive.
+- **Give `pve-imds` a read-only token.** It needs nothing beyond read access to its prefix, for example:
+
+  ```hcl
+  path "kv/data/pve-imds/pools/*" {
+    capabilities = ["read"]
+  }
+  ```
+
+- **Separate clusters.** If several Proxmox clusters share one OpenBao, give each cluster its own [namespace](https://openbao.org/docs/concepts/namespaces/) with `secrets.namespace` (OpenBao 2.3+ or Vault Enterprise), so one cluster's token cannot read another's secrets. Without namespaces, use a different `secrets.path_template` prefix per cluster and scope each cluster's policy to it.
+
+### Token and OpenBao Agent
+
+`pve-imds` has no authentication logic of its own. It reads a token from `secrets.token_file` on every request, so a token renewed by [OpenBao Agent](https://openbao.org/docs/agent-and-proxy/agent/) takes effect immediately. The service runs as a dynamic user that is a member of the `pve-imds-token` group (created by the package), so make the token file readable by that group, for example with an agent file sink in a setgid directory:
+
+```bash
+install -d -m 2750 -o root -g pve-imds-token /run/openbao-agent-pve-imds
+```
+
+```hcl
+sink "file" {
+  config = {
+    path = "/run/openbao-agent-pve-imds/token"
+    mode = 0640
+  }
+}
+```
+
+The service unit only allows IPv4 sockets. If OpenBao is only reachable over IPv6, add a drop-in with `systemctl edit pve-imds`:
+
+```ini
+[Service]
+RestrictAddressFamilies=AF_XDP AF_NETLINK AF_UNIX AF_INET AF_INET6
+```
+
+## Configuration
+
+`pve-imds` reads `/etc/pve-imds/config.yaml` if it exists (or the file given with `--config`). Every option can also be set with an environment variable, e.g. `PVE_IMDS_SECRETS_ENABLED=true`. The options for NoCloud and templated user-data:
+
+```yaml
+nocloud:
+  enabled: true            # serve /nocloud/ (default: true)
+
+secrets:
+  enabled: false           # render secrets= user-data (default: false)
+  address: https://openbao.example.com:8200   # must be https
+  namespace: ""            # optional, sent as X-Vault-Namespace
+  ca_file: /etc/pve-imds/openbao-ca.pem       # optional; default: system CAs
+  token_file: /run/openbao-agent-pve-imds/token
+  path_template: kv/data/pve-imds/pools/{pool}/{name}  # API path below /v1/
+  cache_ttl: 60s           # how long a fetched secret set is reused
+```
+
+`path_template` is the KV v2 API path, so it includes the mount's `data/` segment, and must contain both `{pool}` and `{name}`. Secret sets are cached per pool and set for `cache_ttl`; errors are never cached. Pool membership is re-read on every templated request, so moving a VM to another pool takes effect immediately.
 
 ## How it works
 

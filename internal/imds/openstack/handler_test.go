@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wyattanderson/pve-imds/internal/identity"
+	"github.com/wyattanderson/pve-imds/internal/imds"
+	"github.com/wyattanderson/pve-imds/internal/userdata"
 	"github.com/wyattanderson/pve-imds/internal/vmconfig"
 )
 
@@ -71,7 +74,7 @@ func testRecord() *identity.VMRecord {
 func get(t *testing.T, rec *identity.VMRecord, path string) *http.Response {
 	t.Helper()
 	resolver := &fakeResolver{rec: rec}
-	handler := NewServer().NewHandler(resolver, "tap100i0", 3)
+	handler := NewServer(userdata.New(slog.New(slog.DiscardHandler), nil, nil)).NewHandler(resolver, "tap100i0", 3)
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -735,4 +738,46 @@ func TestAnyVersionAccepted(t *testing.T) {
 			assert.Equal(t, "100", md.UUID)
 		})
 	}
+}
+
+// fakeUserData returns fixed user-data or an error.
+type fakeUserData struct {
+	data string
+	err  error
+}
+
+func (f *fakeUserData) UserData(_ context.Context, _ *identity.VMRecord) (string, error) {
+	return f.data, f.err
+}
+
+func getUserData(t *testing.T, ud imds.UserDataProvider) *http.Response {
+	t.Helper()
+	handler := NewServer(ud).NewHandler(&fakeResolver{rec: testRecord()}, "tap100i0", 3)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/openstack/latest/user_data", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	return w.Result()
+}
+
+func TestUserDataFromProvider(t *testing.T) {
+	resp := getUserData(t, &fakeUserData{data: "rendered"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, "rendered", string(body))
+}
+
+func TestUserDataUnavailable(t *testing.T) {
+	resp := getUserData(t, &fakeUserData{data: "partial", err: imds.ErrUserDataUnavailable})
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.NotEmpty(t, resp.Header.Get("Retry-After"))
+	body, _ := io.ReadAll(resp.Body)
+	assert.NotContains(t, string(body), "partial")
+}
+
+func TestUserDataTemplatedWithoutSecretsIs503(t *testing.T) {
+	// A secrets= block must never be served unrendered.
+	rec := testRecord()
+	rec.Config.Description = "<!--#user-data secrets=worker\ntoken: {{ secret \"t\" }}\n-->"
+	resp := get(t, rec, "/openstack/latest/user_data")
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
