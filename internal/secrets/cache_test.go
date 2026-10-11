@@ -18,7 +18,8 @@ type countingSource struct {
 	err   error
 }
 
-func (s *countingSource) Get(_ context.Context, pool, set string) (map[string]string, error) {
+func (s *countingSource) Get(_ context.Context, scope Scope, set string) (map[string]string, error) {
+	pool := scope.Name
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.calls == nil {
@@ -48,10 +49,10 @@ func TestCacheHitWithinTTL(t *testing.T) {
 	src := &countingSource{}
 	c, now := newTestCache(src, time.Minute)
 
-	v1, err := c.Get(context.Background(), "p", "s")
+	v1, err := c.Get(context.Background(), pool("p"), "s")
 	require.NoError(t, err)
 	*now = now.Add(59 * time.Second)
-	v2, err := c.Get(context.Background(), "p", "s")
+	v2, err := c.Get(context.Background(), pool("p"), "s")
 	require.NoError(t, err)
 
 	assert.Equal(t, v1, v2)
@@ -62,10 +63,10 @@ func TestCacheExpiry(t *testing.T) {
 	src := &countingSource{}
 	c, now := newTestCache(src, time.Minute)
 
-	_, err := c.Get(context.Background(), "p", "s")
+	_, err := c.Get(context.Background(), pool("p"), "s")
 	require.NoError(t, err)
 	*now = now.Add(time.Minute)
-	v, err := c.Get(context.Background(), "p", "s")
+	v, err := c.Get(context.Background(), pool("p"), "s")
 	require.NoError(t, err)
 
 	assert.Equal(t, "2", v["n"])
@@ -76,9 +77,9 @@ func TestCacheKeyedByPoolAndSet(t *testing.T) {
 	src := &countingSource{}
 	c, _ := newTestCache(src, time.Minute)
 
-	a, err := c.Get(context.Background(), "pool-a", "s")
+	a, err := c.Get(context.Background(), pool("pool-a"), "s")
 	require.NoError(t, err)
-	b, err := c.Get(context.Background(), "pool-b", "s")
+	b, err := c.Get(context.Background(), pool("pool-b"), "s")
 	require.NoError(t, err)
 
 	// A VM that moved to another pool gets that pool's set, not a cached
@@ -89,18 +90,29 @@ func TestCacheKeyedByPoolAndSet(t *testing.T) {
 	assert.Equal(t, 1, src.count("pool-b/s"))
 }
 
+func TestCacheKeyedByScopeKind(t *testing.T) {
+	src := &countingSource{}
+	c, _ := newTestCache(src, time.Minute)
+
+	_, err := c.Get(context.Background(), pool("x"), "s")
+	require.NoError(t, err)
+	_, err = c.Get(context.Background(), tag("x"), "s")
+	require.NoError(t, err)
+	assert.Equal(t, 2, src.count("x/s"), "pool x and tag x are different scopes")
+}
+
 func TestCacheErrorsNotCached(t *testing.T) {
 	src := &countingSource{err: errors.New("unreachable")}
 	c, _ := newTestCache(src, time.Minute)
 
-	_, err := c.Get(context.Background(), "p", "s")
+	_, err := c.Get(context.Background(), pool("p"), "s")
 	require.Error(t, err)
 
 	src.mu.Lock()
 	src.err = nil
 	src.mu.Unlock()
 
-	_, err = c.Get(context.Background(), "p", "s")
+	_, err = c.Get(context.Background(), pool("p"), "s")
 	require.NoError(t, err)
 	assert.Equal(t, 2, src.count("p/s"))
 }
@@ -110,7 +122,7 @@ func TestCacheZeroTTLDisablesCaching(t *testing.T) {
 	c, _ := newTestCache(src, 0)
 
 	for range 3 {
-		_, err := c.Get(context.Background(), "p", "s")
+		_, err := c.Get(context.Background(), pool("p"), "s")
 		require.NoError(t, err)
 	}
 	assert.Equal(t, 3, src.count("p/s"))
@@ -120,11 +132,11 @@ func TestCacheReturnsCopy(t *testing.T) {
 	src := &countingSource{}
 	c, _ := newTestCache(src, time.Minute)
 
-	v, err := c.Get(context.Background(), "p", "s")
+	v, err := c.Get(context.Background(), pool("p"), "s")
 	require.NoError(t, err)
 	v["pool"] = "mutated"
 
-	v2, err := c.Get(context.Background(), "p", "s")
+	v2, err := c.Get(context.Background(), pool("p"), "s")
 	require.NoError(t, err)
 	assert.Equal(t, "p", v2["pool"])
 }

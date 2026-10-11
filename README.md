@@ -166,7 +166,7 @@ cluster:
 ```
 
 - `secrets=<set>` on the opening line names the **secret set**. Without it, user data is served exactly as written and no placeholders are processed, so cloud-init Jinja templates are unaffected. The attribute must be on the same line as `<!--#user-data`.
-- The set is read from the KV path `kv/data/pve-imds/pools/{pool}/{name}`, where `{name}` is the set name and `{pool}` is the VM's Proxmox [resource pool](https://pve.proxmox.com/wiki/User_Management#pveum_pools). The pool is read from Proxmox (`/etc/pve/user.cfg`), never from anything the VM controls. Nested pools (`parent/child`) become nested paths.
+- The set is read from a KV path inside the VM's **scope**, which is either its resource pool or one of its tags (see [Scoping secrets](#scoping-secrets-pools-or-tags)). Both come from Proxmox, never from anything the VM controls.
 - `{{ secret "<field>" }}` is replaced with that field of the set. Whitespace inside the braces is allowed. Nothing else is interpreted: other `{{ ... }}` text is left as is, and values are inserted verbatim, so quote or indent them as your format requires (Talos expects base64 for certificates and keys, which keeps them on one line).
 - Set names may contain only letters, digits, `-` and `_` (up to 64 characters).
 - Templated user-data applies to the NoCloud, OpenStack and EC2 user-data endpoints alike.
@@ -179,6 +179,19 @@ bao kv put kv/pve-imds/pools/k8s-dmz-01/worker \
     machine_token=... machine_ca_crt=... cluster_token=...
 ```
 
+### Scoping secrets: pools or tags
+
+`secrets.path_template` decides what a VM's secret sets are scoped to. It must contain `{name}` (the set name) and exactly one of:
+
+- **`{pool}`** (default, `kv/data/pve-imds/pools/{pool}/{name}`): the VM's Proxmox [resource pool](https://pve.proxmox.com/wiki/User_Management#pveum_pools), read from `/etc/pve/user.cfg`. Nested pools (`parent/child`) become nested paths. A VM must be in a pool to use templating.
+- **`{tag}`** (e.g. `kv/data/pve-imds/tags/{tag}/{name}`): the VM tag that starts with `secrets.tag_prefix` (default `pve-imds-`), without the prefix and lowercased. A VM tagged `pve-imds-k8s-dmz-01` reads `kv/data/pve-imds/tags/k8s-dmz-01/<set>`. Other tags are ignored. A VM with no such tag, or with more than one, gets a 503.
+
+  By default (`secrets.require_registered_tags: true`) the tag must also be listed in `registered-tags` in `/etc/pve/datacenter.cfg` (in the GUI under *Datacenter → Options*, or with `pvesh set /cluster/options --registered-tags 'pve-imds-k8s-dmz-01;...'`). Registered tags can only be set or removed by users with `Sys.Modify` on `/`. Without that, anyone with `VM.Config.Options` on any VM could tag it and read that scope's secrets. Turn the check off only if everyone who can edit VMs is trusted with all secrets.
+
+  Tag scoping fits well with [JWT-SVID](#jwt-svid-identity-tokens) roles that are bound to tags; register those tags for the same reason.
+
+Pool membership, tags and `registered-tags` are re-read on every templated request, so changes, including ones made on other cluster nodes, take effect immediately.
+
 ### Failure behaviour
 
 Rendering fails closed. The user-data endpoints return `503 Service Unavailable` with a `Retry-After` header, never a partially rendered or unrendered config, when:
@@ -186,19 +199,19 @@ Rendering fails closed. The user-data endpoints return `503 Service Unavailable`
 - OpenBao is unreachable, returns an error, or rejects the token,
 - the secret set or a referenced field doesn't exist (only string fields are used),
 - the set name is invalid,
-- the VM is not in a pool, or
+- the VM has no scope: it is not in a pool, or it has no, several, or an unregistered scope tag, or
 - the Notes use `secrets=` but `secrets.enabled` is off.
 
-cloud-init honours `Retry-After`; Talos keeps retrying until it gets the config rather than falling into maintenance mode. `pve-imds` logs the VMID, pool, set name and outcome of every templated request, never user-data or secret values.
+cloud-init honours `Retry-After`; Talos keeps retrying until it gets the config rather than falling into maintenance mode. `pve-imds` logs the VMID, scope (pool or tag), set name and outcome of every templated request, never user-data or secret values.
 
 ### Security model
 
-- **Secrets are bound to the VM's pool.** A VM can only ever receive secrets from its own pool's prefix, whatever its Notes contain, so Proxmox pool permissions decide who can give a VM access to which secrets. Anyone who can move a VM into a pool, or edit the Notes of a VM in a pool, can obtain that pool's secrets through the VM.
+- **Secrets are bound to the VM's scope.** A VM can only ever receive secrets from its own scope's prefix, whatever its Notes contain, so Proxmox permissions decide who can give a VM access to which secrets: `Pool.Allocate` on the pool for pool scoping, `Sys.Modify` on `/` for registered scope tags. Anyone who can put a VM into a scope, or edit the Notes of a VM in a scope, can obtain that scope's secrets through the VM.
 - **Keep secrets out of Notes.** Notes are visible to `VM.Audit` and included in backups; set names and placeholders are not sensitive.
 - **Give `pve-imds` a read-only token.** It needs nothing beyond read access to its prefix, for example:
 
   ```hcl
-  path "kv/data/pve-imds/pools/*" {
+  path "kv/data/pve-imds/pools/*" {   # or kv/data/pve-imds/tags/*
     capabilities = ["read"]
   }
   ```
@@ -243,11 +256,13 @@ secrets:
   namespace: ""            # optional, sent as X-Vault-Namespace
   ca_file: /etc/pve-imds/openbao-ca.pem       # optional; default: system CAs
   token_file: /run/openbao-agent-pve-imds/token
-  path_template: kv/data/pve-imds/pools/{pool}/{name}  # API path below /v1/
+  path_template: kv/data/pve-imds/pools/{pool}/{name}  # API path below /v1/; {pool} or {tag}
+  tag_prefix: pve-imds-    # with {tag}: the tag that selects the scope
+  require_registered_tags: true  # with {tag}: only trust registered tags
   cache_ttl: 60s           # how long a fetched secret set is reused
 ```
 
-`path_template` is the KV v2 API path, so it includes the mount's `data/` segment, and must contain both `{pool}` and `{name}`. Secret sets are cached per pool and set for `cache_ttl`; errors are never cached. Pool membership is re-read on every templated request, so moving a VM to another pool takes effect immediately.
+`path_template` is the KV v2 API path, so it includes the mount's `data/` segment. It must contain `{name}` and exactly one of `{pool}` or `{tag}`. Secret sets are cached per scope and set for `cache_ttl`; errors are never cached.
 
 ## How it works
 

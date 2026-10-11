@@ -44,19 +44,24 @@ const workerRendered = "version: v1alpha1\n" +
 	"---\n" +
 	"kind: HostnameConfig"
 
-// fakeSource returns sets keyed by "pool/set" and records calls.
+// fakeSource returns sets keyed by "pool/set" (or "tag:name/set" for tag
+// scopes) and records calls.
 type fakeSource struct {
 	sets  map[string]map[string]string
 	err   error
 	calls []string
 }
 
-func (f *fakeSource) Get(_ context.Context, pool, set string) (map[string]string, error) {
-	f.calls = append(f.calls, pool+"/"+set)
+func (f *fakeSource) Get(_ context.Context, scope secrets.Scope, set string) (map[string]string, error) {
+	key := scope.Name + "/" + set
+	if scope.Kind == secrets.ScopeTag {
+		key = "tag:" + key
+	}
+	f.calls = append(f.calls, key)
 	if f.err != nil {
 		return nil, f.err
 	}
-	v, ok := f.sets[pool+"/"+set]
+	v, ok := f.sets[key]
 	if !ok {
 		return nil, secrets.ErrSetNotFound
 	}
@@ -85,7 +90,7 @@ func newEnv(t *testing.T, userCfg string) *env {
 	logs := &bytes.Buffer{}
 	log := slog.New(slog.NewTextHandler(logs, nil))
 	return &env{
-		provider: New(log, src, pvepool.New(fs, pvepool.DefaultUserCfgPath)),
+		provider: New(log, src, PoolScope{Pools: pvepool.New(fs, pvepool.DefaultUserCfgPath)}),
 		source:   src,
 		fs:       fs,
 		logs:     logs,
@@ -303,7 +308,138 @@ func providerFor(t *testing.T, srv *httptest.Server, userCfg string) *Provider {
 
 	fs := afero.NewMemMapFs()
 	require.NoError(t, afero.WriteFile(fs, pvepool.DefaultUserCfgPath, []byte(userCfg), 0o640))
-	return New(slog.New(slog.DiscardHandler), secrets.NewCache(kv, time.Minute), pvepool.New(fs, pvepool.DefaultUserCfgPath))
+	return New(slog.New(slog.DiscardHandler), secrets.NewCache(kv, time.Minute), PoolScope{Pools: pvepool.New(fs, pvepool.DefaultUserCfgPath)})
+}
+
+// ---------------------------------------------------------------------------
+// Tag scope
+// ---------------------------------------------------------------------------
+
+// fakeRegistry reports the listed tags as registered.
+type fakeRegistry map[string]bool
+
+func (f fakeRegistry) IsRegistered(tag string) (bool, error) { return f[tag], nil }
+
+func tagProvider(t *testing.T, registry TagRegistry) (*Provider, *fakeSource, *bytes.Buffer) {
+	t.Helper()
+	src := &fakeSource{sets: map[string]map[string]string{
+		"tag:k8s-dmz-01/worker": {"machine_token": "TAGTOKEN", "cluster_secret": "TAGSECRET"},
+	}}
+	logs := &bytes.Buffer{}
+	p := New(slog.New(slog.NewTextHandler(logs, nil)), src, TagScope{Prefix: "pve-imds-", Registry: registry})
+	return p, src, logs
+}
+
+func taggedRecord(desc string, tags ...string) *identity.VMRecord {
+	rec := record(desc)
+	rec.Config.Tags = tags
+	return rec
+}
+
+func TestTagScope(t *testing.T) {
+	p, src, logs := tagProvider(t, fakeRegistry{"pve-imds-k8s-dmz-01": true})
+	out, err := p.UserData(context.Background(), taggedRecord(workerTemplate, "prod", "pve-imds-k8s-dmz-01", "web"))
+	require.NoError(t, err)
+	assert.Contains(t, out, "token: TAGTOKEN")
+	assert.Equal(t, []string{"tag:k8s-dmz-01/worker"}, src.calls)
+	assert.Contains(t, logs.String(), "tag=k8s-dmz-01")
+}
+
+func TestTagScopeCaseInsensitive(t *testing.T) {
+	p, src, _ := tagProvider(t, nil)
+	_, err := p.UserData(context.Background(), taggedRecord(workerTemplate, "PVE-IMDS-K8S-DMZ-01"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"tag:k8s-dmz-01/worker"}, src.calls)
+}
+
+func TestTagScopeFailures(t *testing.T) {
+	cases := map[string]struct {
+		tags     []string
+		registry TagRegistry
+		outcome  string
+	}{
+		"no tags":          {nil, nil, "no_scope_tag"},
+		"no matching tag":  {[]string{"prod", "k8s-dmz-01"}, nil, "no_scope_tag"},
+		"bare prefix":      {[]string{"pve-imds-"}, nil, "no_scope_tag"},
+		"two scope tags":   {[]string{"pve-imds-a", "pve-imds-b"}, nil, "multiple_scope_tags"},
+		"not registered":   {[]string{"pve-imds-k8s-dmz-01"}, fakeRegistry{}, "tag_not_registered"},
+		"other registered": {[]string{"pve-imds-k8s-dmz-01"}, fakeRegistry{"pve-imds-other": true}, "tag_not_registered"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, src, logs := tagProvider(t, tc.registry)
+			out, err := p.UserData(context.Background(), taggedRecord(workerTemplate, tc.tags...))
+			assertUnavailable(t, out, err)
+			assert.Empty(t, src.calls)
+			assert.Contains(t, logs.String(), "outcome="+tc.outcome)
+		})
+	}
+}
+
+func TestTagScopeDuplicateTagIsOneScope(t *testing.T) {
+	p, src, _ := tagProvider(t, nil)
+	_, err := p.UserData(context.Background(), taggedRecord(workerTemplate, "pve-imds-k8s-dmz-01", "PVE-IMDS-K8S-DMZ-01"))
+	require.NoError(t, err)
+	assert.Len(t, src.calls, 1)
+}
+
+func TestTagScopeIgnoresNotes(t *testing.T) {
+	// The scope comes only from the VM's tags; the set name cannot escape it.
+	p, src, _ := tagProvider(t, nil)
+	for _, set := range []string{"worker", "../other/worker", "..%2Fother"} {
+		desc := "<!--#user-data secrets=" + set + "\nmachine: {{ secret \"machine_token\" }}\n-->"
+		_, _ = p.UserData(context.Background(), taggedRecord(desc, "pve-imds-k8s-dmz-01"))
+	}
+	for _, c := range src.calls {
+		assert.Regexp(t, `^tag:k8s-dmz-01/`, c)
+	}
+}
+
+func TestTagScopeEndToEnd(t *testing.T) {
+	// Real KV client with a {tag} template and a real datacenter.cfg registry.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/kv/data/pve-imds/tags/k8s-dmz-01/worker" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"data":{"data":{"machine_token":"TOKVALUE1","cluster_secret":"SECVALUE2"}}}`) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.pem")
+	tokenFile := filepath.Join(dir, "token")
+	require.NoError(t, os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600))
+	require.NoError(t, os.WriteFile(tokenFile, []byte("tok"), 0o600))
+
+	fs := afero.NewMemMapFs()
+	require.NoError(t, afero.WriteFile(fs, "/etc/pve/datacenter.cfg", []byte("registered-tags: pve-imds-k8s-dmz-01\n"), 0o640))
+
+	cfg := config.Default().Secrets
+	cfg.Enabled = true
+	cfg.Address = srv.URL
+	cfg.CAFile = caFile
+	cfg.TokenFile = tokenFile
+	cfg.PathTemplate = "kv/data/pve-imds/tags/{tag}/{name}"
+
+	p, err := FromConfig(cfg, fs, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+
+	out, err := p.UserData(context.Background(), taggedRecord(workerTemplate, "pve-imds-k8s-dmz-01"))
+	require.NoError(t, err)
+	assert.Equal(t, workerRendered, out)
+
+	// Unregistering the tag takes effect on the next request.
+	require.NoError(t, afero.WriteFile(fs, "/etc/pve/datacenter.cfg", []byte("keyboard: en-us\n"), 0o640))
+	out, err = p.UserData(context.Background(), taggedRecord(workerTemplate, "pve-imds-k8s-dmz-01"))
+	assertUnavailable(t, out, err)
+
+	// With the check turned off, an unregistered tag is accepted.
+	cfg.RequireRegisteredTags = false
+	p, err = FromConfig(cfg, fs, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	_, err = p.UserData(context.Background(), taggedRecord(workerTemplate, "pve-imds-k8s-dmz-01"))
+	require.NoError(t, err)
 }
 
 func TestFromConfig(t *testing.T) {
@@ -323,4 +459,15 @@ func TestFromConfig(t *testing.T) {
 	p, err = FromConfig(cfg, afero.NewMemMapFs(), slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	assert.NotNil(t, p.source)
+	assert.IsType(t, PoolScope{}, p.scopes)
+
+	cfg.PathTemplate = "kv/data/pve-imds/tags/{tag}/{name}"
+	p, err = FromConfig(cfg, afero.NewMemMapFs(), slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	assert.IsType(t, TagScope{}, p.scopes)
+	assert.NotNil(t, p.scopes.(TagScope).Registry, "registered tags are required by default")
+
+	cfg.TagPrefix = ""
+	_, err = FromConfig(cfg, afero.NewMemMapFs(), slog.New(slog.DiscardHandler))
+	require.Error(t, err, "an empty tag prefix must be rejected")
 }

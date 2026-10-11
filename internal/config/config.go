@@ -47,8 +47,18 @@ type SecretsConfig struct {
 	// re-read on every request so token rotation needs no restart.
 	TokenFile string `mapstructure:"token_file"`
 	// PathTemplate is the API path (below /v1/) of a secret set. It must
-	// contain {pool} and {name}. Default: kv/data/pve-imds/pools/{pool}/{name}.
+	// contain {name} and exactly one of {pool} (scope secrets by resource
+	// pool) or {tag} (scope secrets by VM tag). Default:
+	// kv/data/pve-imds/pools/{pool}/{name}.
 	PathTemplate string `mapstructure:"path_template"`
+	// TagPrefix marks the VM tag that selects the secret scope when
+	// PathTemplate uses {tag}: a VM tagged "<prefix>k8s" uses scope "k8s".
+	// Default: "pve-imds-".
+	TagPrefix string `mapstructure:"tag_prefix"`
+	// RequireRegisteredTags only accepts scope tags listed in
+	// registered-tags in /etc/pve/datacenter.cfg, which only users with
+	// Sys.Modify on "/" can set. Default: true.
+	RequireRegisteredTags bool `mapstructure:"require_registered_tags"`
 	// CacheTTL is how long a fetched secret set is reused. Default: 60s.
 	CacheTTL time.Duration `mapstructure:"cache_ttl"`
 }
@@ -89,8 +99,10 @@ func Default() Config {
 			Enabled: true,
 		},
 		Secrets: SecretsConfig{
-			PathTemplate: "kv/data/pve-imds/pools/{pool}/{name}",
-			CacheTTL:     60 * time.Second,
+			PathTemplate:          "kv/data/pve-imds/pools/{pool}/{name}",
+			TagPrefix:             "pve-imds-",
+			RequireRegisteredTags: true,
+			CacheTTL:              60 * time.Second,
 		},
 	}
 }

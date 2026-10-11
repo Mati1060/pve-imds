@@ -91,6 +91,8 @@ func initConfig(cfgFile string) error {
 	viper.SetDefault("secrets.ca_file", def.Secrets.CAFile)
 	viper.SetDefault("secrets.token_file", def.Secrets.TokenFile)
 	viper.SetDefault("secrets.path_template", def.Secrets.PathTemplate)
+	viper.SetDefault("secrets.tag_prefix", def.Secrets.TagPrefix)
+	viper.SetDefault("secrets.require_registered_tags", def.Secrets.RequireRegisteredTags)
 	viper.SetDefault("secrets.cache_ttl", def.Secrets.CacheTTL)
 
 	if cfgFile == "" {

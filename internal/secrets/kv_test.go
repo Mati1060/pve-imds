@@ -89,7 +89,7 @@ func TestKVGet(t *testing.T) {
 	f.sets["/v1/kv/data/pve-imds/pools/k8s-dmz-01/worker"] = `{"token":"abc","ca":"PEM","n":5,"b":true,"o":{"x":1}}`
 	kv, _ := kvClient(t, f, nil)
 
-	vals, err := kv.Get(context.Background(), "k8s-dmz-01", "worker")
+	vals, err := kv.Get(context.Background(), pool("k8s-dmz-01"), "worker")
 	require.NoError(t, err)
 	// Non-string fields are dropped.
 	assert.Equal(t, map[string]string{"token": "abc", "ca": "PEM"}, vals)
@@ -104,9 +104,24 @@ func TestKVGetNestedPool(t *testing.T) {
 	f.sets["/v1/kv/data/pve-imds/pools/dc1/k8s/worker"] = `{"token":"nested"}`
 	kv, _ := kvClient(t, f, nil)
 
-	vals, err := kv.Get(context.Background(), "dc1/k8s", "worker")
+	vals, err := kv.Get(context.Background(), pool("dc1/k8s"), "worker")
 	require.NoError(t, err)
 	assert.Equal(t, "nested", vals["token"])
+}
+
+func TestKVGetTagScope(t *testing.T) {
+	f := newFakeKV(t)
+	f.sets["/v1/kv/data/pve-imds/tags/k8s-dmz-01/worker"] = `{"token":"by-tag"}`
+	kv, _ := kvClient(t, f, func(o *KVOptions) { o.PathTemplate = tagTmpl })
+	assert.Equal(t, ScopeTag, kv.ScopeKind())
+
+	vals, err := kv.Get(context.Background(), tag("k8s-dmz-01"), "worker")
+	require.NoError(t, err)
+	assert.Equal(t, "by-tag", vals["token"])
+
+	// A pool scope cannot be used with a tag template.
+	_, err = kv.Get(context.Background(), pool("k8s-dmz-01"), "worker")
+	assert.ErrorIs(t, err, ErrInvalidScope)
 }
 
 func TestKVGetNamespaceHeader(t *testing.T) {
@@ -114,7 +129,7 @@ func TestKVGetNamespaceHeader(t *testing.T) {
 	f.sets["/v1/kv/data/pve-imds/pools/p/s"] = `{"k":"v"}`
 	kv, _ := kvClient(t, f, func(o *KVOptions) { o.Namespace = "pve-cluster-a" })
 
-	_, err := kv.Get(context.Background(), "p", "s")
+	_, err := kv.Get(context.Background(), pool("p"), "s")
 	require.NoError(t, err)
 	assert.Equal(t, "pve-cluster-a", f.lastRequest().Header.Get("X-Vault-Namespace"))
 }
@@ -123,7 +138,7 @@ func TestKVGetNotFound(t *testing.T) {
 	f := newFakeKV(t)
 	kv, _ := kvClient(t, f, nil)
 
-	_, err := kv.Get(context.Background(), "p", "missing")
+	_, err := kv.Get(context.Background(), pool("p"), "missing")
 	assert.ErrorIs(t, err, ErrSetNotFound)
 }
 
@@ -132,7 +147,7 @@ func TestKVGetDeletedVersion(t *testing.T) {
 	f.sets["/v1/kv/data/pve-imds/pools/p/s"] = `null`
 	kv, _ := kvClient(t, f, nil)
 
-	_, err := kv.Get(context.Background(), "p", "s")
+	_, err := kv.Get(context.Background(), pool("p"), "s")
 	assert.ErrorIs(t, err, ErrSetNotFound)
 }
 
@@ -142,7 +157,7 @@ func TestKVGetForbidden(t *testing.T) {
 	kv, tokenFile := kvClient(t, f, nil)
 	require.NoError(t, os.WriteFile(tokenFile, []byte("wrong"), 0o600))
 
-	_, err := kv.Get(context.Background(), "p", "s")
+	_, err := kv.Get(context.Background(), pool("p"), "s")
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrSetNotFound)
 	assert.Contains(t, err.Error(), "403")
@@ -153,7 +168,7 @@ func TestKVGetServerError(t *testing.T) {
 	f.status = http.StatusServiceUnavailable // e.g. sealed
 	kv, _ := kvClient(t, f, nil)
 
-	_, err := kv.Get(context.Background(), "p", "s")
+	_, err := kv.Get(context.Background(), pool("p"), "s")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "503")
 }
@@ -163,7 +178,7 @@ func TestKVGetUnreachable(t *testing.T) {
 	kv, _ := kvClient(t, f, nil)
 	f.srv.Close()
 
-	_, err := kv.Get(context.Background(), "p", "s")
+	_, err := kv.Get(context.Background(), pool("p"), "s")
 	require.Error(t, err)
 }
 
@@ -173,7 +188,7 @@ func TestKVGetUntrustedCertificate(t *testing.T) {
 	// No CA file: the test server's self-signed certificate is not trusted.
 	kv, _ := kvClient(t, f, func(o *KVOptions) { o.CAFile = "" })
 
-	_, err := kv.Get(context.Background(), "p", "s")
+	_, err := kv.Get(context.Background(), pool("p"), "s")
 	require.Error(t, err)
 }
 
@@ -182,7 +197,7 @@ func TestKVGetTokenRereadOnChange(t *testing.T) {
 	f.sets["/v1/kv/data/pve-imds/pools/p/s"] = `{"k":"v"}`
 	kv, tokenFile := kvClient(t, f, nil)
 
-	_, err := kv.Get(context.Background(), "p", "s")
+	_, err := kv.Get(context.Background(), pool("p"), "s")
 	require.NoError(t, err)
 
 	// The agent rotates the token; the next request uses the new one.
@@ -191,7 +206,7 @@ func TestKVGetTokenRereadOnChange(t *testing.T) {
 	f.mu.Unlock()
 	require.NoError(t, os.WriteFile(tokenFile, []byte("tok-2"), 0o600))
 
-	_, err = kv.Get(context.Background(), "p", "s")
+	_, err = kv.Get(context.Background(), pool("p"), "s")
 	require.NoError(t, err)
 	assert.Equal(t, "tok-2", f.lastRequest().Header.Get("X-Vault-Token"))
 }
@@ -201,11 +216,11 @@ func TestKVGetTokenFileMissingOrEmpty(t *testing.T) {
 	kv, tokenFile := kvClient(t, f, nil)
 
 	require.NoError(t, os.WriteFile(tokenFile, []byte("  \n"), 0o600))
-	_, err := kv.Get(context.Background(), "p", "s")
+	_, err := kv.Get(context.Background(), pool("p"), "s")
 	require.Error(t, err)
 
 	require.NoError(t, os.Remove(tokenFile))
-	_, err = kv.Get(context.Background(), "p", "s")
+	_, err = kv.Get(context.Background(), pool("p"), "s")
 	require.Error(t, err)
 }
 
@@ -213,10 +228,10 @@ func TestKVGetRejectsInvalidInput(t *testing.T) {
 	f := newFakeKV(t)
 	kv, _ := kvClient(t, f, nil)
 
-	_, err := kv.Get(context.Background(), "p", "../q/s")
+	_, err := kv.Get(context.Background(), pool("p"), "../q/s")
 	require.ErrorIs(t, err, ErrInvalidSetName)
-	_, err = kv.Get(context.Background(), "p/..", "s")
-	require.ErrorIs(t, err, ErrInvalidPool)
+	_, err = kv.Get(context.Background(), pool("p/.."), "s")
+	require.ErrorIs(t, err, ErrInvalidScope)
 	assert.Empty(t, f.requests, "no request must be sent for invalid input")
 }
 

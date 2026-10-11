@@ -249,6 +249,7 @@ func templatingProvider(log *slog.Logger) (*userdata.Provider, func(), error) {
 		return nil, nil, err
 	}
 
-	provider := userdata.New(log, secrets.NewCache(src, time.Minute), pvepool.New(fs, pvepool.DefaultUserCfgPath))
+	scopes := userdata.PoolScope{Pools: pvepool.New(fs, pvepool.DefaultUserCfgPath)}
+	provider := userdata.New(log, secrets.NewCache(src, time.Minute), scopes)
 	return provider, cleanup, nil
 }

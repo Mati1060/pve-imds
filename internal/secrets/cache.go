@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// Cache wraps a Source with a per-(pool, set) TTL cache. Concurrent misses
+// Cache wraps a Source with a per-(scope, set) TTL cache. Concurrent misses
 // for the same key share one upstream request. Errors are never cached, so a
 // failed fetch is retried on the next request.
 type Cache struct {
@@ -23,7 +23,10 @@ type Cache struct {
 	entries map[cacheKey]cacheEntry
 }
 
-type cacheKey struct{ pool, set string }
+type cacheKey struct {
+	scope Scope
+	set   string
+}
 
 type cacheEntry struct {
 	values  map[string]string
@@ -42,8 +45,8 @@ func NewCache(src Source, ttl time.Duration) *Cache {
 }
 
 // Get implements [Source]. The returned map is a copy and may be modified.
-func (c *Cache) Get(ctx context.Context, pool, set string) (map[string]string, error) {
-	key := cacheKey{pool, set}
+func (c *Cache) Get(ctx context.Context, scope Scope, set string) (map[string]string, error) {
+	key := cacheKey{scope, set}
 
 	c.mu.Lock()
 	e, ok := c.entries[key]
@@ -54,8 +57,8 @@ func (c *Cache) Get(ctx context.Context, pool, set string) (map[string]string, e
 	delete(c.entries, key)
 	c.mu.Unlock()
 
-	v, err, _ := c.group.Do(pool+"\x00"+set, func() (any, error) {
-		values, err := c.src.Get(ctx, pool, set)
+	v, err, _ := c.group.Do(string(scope.Kind)+"\x00"+scope.Name+"\x00"+set, func() (any, error) {
+		values, err := c.src.Get(ctx, scope, set)
 		if err != nil {
 			return nil, err
 		}

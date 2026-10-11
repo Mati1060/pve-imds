@@ -15,6 +15,10 @@ var setNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 // (PVE::AccessControl::verify_poolname).
 var poolSegmentRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// tagRe is the charset Proxmox allows in tags (PVE::JSONSchema PVE_TAG_RE,
+// case-insensitive). Tags never contain '/'.
+var tagRe = regexp.MustCompile(`^[A-Za-z0-9_+.-]+$`)
+
 // maxPoolDepth is the maximum nesting depth Proxmox allows for pools.
 const maxPoolDepth = 3
 
@@ -30,57 +34,88 @@ func ValidateSetName(name string) error {
 	return nil
 }
 
-// ValidatePool returns an error wrapping ErrInvalidPool unless pool is a
-// valid Proxmox pool ID: 1–3 '/'-separated segments of [A-Za-z0-9._-]. Pool
-// IDs come from Proxmox and are trusted, but "." and ".." segments are
-// rejected anyway because Proxmox would accept them and they have a special
-// meaning in paths.
-func ValidatePool(pool string) error {
-	segs := strings.Split(pool, "/")
-	if len(segs) > maxPoolDepth {
-		return fmt.Errorf("%w: %q nested too deeply", ErrInvalidPool, pool)
+// ValidateScope returns an error wrapping ErrInvalidScope unless scope.Name
+// is valid for its kind.
+//
+// A pool ID must be 1–3 '/'-separated segments of [A-Za-z0-9._-]. A tag must
+// be a single segment of [A-Za-z0-9_+.-]. Both come from Proxmox and are
+// trusted, but "." and ".." are rejected anyway because Proxmox would accept
+// them and they have a special meaning in paths.
+func ValidateScope(scope Scope) error {
+	var segs []string
+	switch scope.Kind {
+	case ScopePool:
+		segs = strings.Split(scope.Name, "/")
+		if len(segs) > maxPoolDepth {
+			return fmt.Errorf("%w: pool %q nested too deeply", ErrInvalidScope, scope.Name)
+		}
+	case ScopeTag:
+		segs = []string{scope.Name}
+	default:
+		return fmt.Errorf("%w: unknown kind %q", ErrInvalidScope, scope.Kind)
+	}
+
+	re := poolSegmentRe
+	if scope.Kind == ScopeTag {
+		re = tagRe
 	}
 	for _, s := range segs {
-		if !poolSegmentRe.MatchString(s) || s == "." || s == ".." {
-			return fmt.Errorf("%w: %q", ErrInvalidPool, pool)
+		if !re.MatchString(s) || s == "." || s == ".." {
+			return fmt.Errorf("%w: %s %q", ErrInvalidScope, scope.Kind, scope.Name)
 		}
 	}
 	return nil
 }
 
-// ValidatePathTemplate checks that tmpl contains both {pool} and {name} and no
-// other variables.
-func ValidatePathTemplate(tmpl string) error {
-	if !strings.Contains(tmpl, "{pool}") || !strings.Contains(tmpl, "{name}") {
-		return fmt.Errorf("secrets: path template %q must contain {pool} and {name}", tmpl)
-	}
+// TemplateScope validates tmpl and returns the scope kind it uses. A template
+// must contain {name} and exactly one of {pool} or {tag}, and no other
+// variables.
+func TemplateScope(tmpl string) (ScopeKind, error) {
 	for _, v := range templateVarRe.FindAllString(tmpl, -1) {
-		if v != "{pool}" && v != "{name}" {
-			return fmt.Errorf("secrets: path template %q contains unknown variable %s", tmpl, v)
+		if v != "{pool}" && v != "{tag}" && v != "{name}" {
+			return "", fmt.Errorf("secrets: path template %q contains unknown variable %s", tmpl, v)
 		}
 	}
-	return nil
+	hasPool := strings.Contains(tmpl, "{pool}")
+	hasTag := strings.Contains(tmpl, "{tag}")
+	switch {
+	case !strings.Contains(tmpl, "{name}"):
+		return "", fmt.Errorf("secrets: path template %q must contain {name}", tmpl)
+	case hasPool == hasTag:
+		return "", fmt.Errorf("secrets: path template %q must contain exactly one of {pool} or {tag}", tmpl)
+	case hasPool:
+		return ScopePool, nil
+	default:
+		return ScopeTag, nil
+	}
 }
 
-// BuildPath expands tmpl for pool and set. Both are validated, and every
-// pool segment and the set name are path-escaped, so the result always stays
-// below the template's fixed prefix. Nested pools ("parent/child") expand to
-// one path segment per pool level.
-func BuildPath(tmpl, pool, set string) (string, error) {
-	if err := ValidatePool(pool); err != nil {
+// BuildPath expands tmpl for scope and set. Both are validated, the scope kind
+// must match the template, and every segment is path-escaped, so the result
+// always stays below the template's fixed prefix. Nested pools
+// ("parent/child") expand to one path segment per pool level.
+func BuildPath(tmpl string, scope Scope, set string) (string, error) {
+	kind, err := TemplateScope(tmpl)
+	if err != nil {
+		return "", err
+	}
+	if kind != scope.Kind {
+		return "", fmt.Errorf("%w: template uses {%s}, got a %s scope", ErrInvalidScope, kind, scope.Kind)
+	}
+	if err := ValidateScope(scope); err != nil {
 		return "", err
 	}
 	if err := ValidateSetName(set); err != nil {
 		return "", err
 	}
 
-	segs := strings.Split(pool, "/")
+	segs := strings.Split(scope.Name, "/")
 	for i, s := range segs {
 		segs[i] = url.PathEscape(s)
 	}
 
 	return strings.NewReplacer(
-		"{pool}", strings.Join(segs, "/"),
+		"{"+string(kind)+"}", strings.Join(segs, "/"),
 		"{name}", url.PathEscape(set),
 	).Replace(strings.Trim(tmpl, "/")), nil
 }
