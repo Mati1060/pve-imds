@@ -42,3 +42,15 @@ jobs:
             push --prune "$MIRROR_URL" \
             '+refs/heads/*:refs/heads/*' \
             '+refs/tags/*:refs/tags/*'
+
+      # Runs after the mirror push so the commit already exists on the mirror.
+      - name: Start package build
+        if: github.ref == 'refs/heads/main'
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"ref\":\"$GITHUB_SHA\"}}" \
+            https://git.mati1060.com/api/v1/repos/Internal-Projects/pve-imds/actions/workflows/release.yml/dispatches
