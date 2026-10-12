@@ -1,0 +1,44 @@
+name: mirror
+
+# Mirrors all branches and tags to the self-hosted git server on every push
+# (including branch and tag deletions, which also trigger "push").
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two mirror pushes at once; a newer run supersedes a queued one.
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      MIRROR_URL: https://git.mati1060.com/Mati1060/pve-imds.git
+    steps:
+      - name: Clone repository
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=Authorization: Basic $auth" \
+            clone --bare "https://github.com/${GITHUB_REPOSITORY}.git" repo.git
+
+      - name: Push to mirror
+        working-directory: repo.git
+        env:
+          MIRROR_USERNAME: ${{ secrets.MIRROR_USERNAME }}
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+        run: |
+          auth=$(printf '%s:%s' "$MIRROR_USERNAME" "$MIRROR_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          # Only branches and tags: GitHub's refs/pull/* are read-only on
+          # Gitea/Forgejo. --prune removes branches and tags deleted here.
+          git -c "http.extraheader=Authorization: Basic $auth" \
+            push --prune "$MIRROR_URL" \
+            '+refs/heads/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
