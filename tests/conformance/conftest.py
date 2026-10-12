@@ -4,7 +4,7 @@ Pytest configuration for the IMDS conformance suites.
 Adds ~/git/cloud-init to sys.path so DataSource* classes can be imported
 without installing cloud-init as a package, and provides session-scoped
 fixtures that build the Go harness binary once and start it for each
-emulation target (ec2, openstack).
+emulation target (ec2, openstack, nocloud).
 """
 
 import json
@@ -108,5 +108,18 @@ def openstack_imds_server(_imds_binary):
         port, vmid, node, mac, vm_name, local_ipv4, base_url
     """
     proc, info = _launch_server(_imds_binary, "openstack")
+    yield info
+    _terminate(proc)
+
+
+@pytest.fixture(scope="session")
+def nocloud_imds_server(_imds_binary):
+    """NoCloud IMDS harness: start, yield info dict, then terminate.
+
+    The fake VM has templated user-data and is in a nested pool; the harness
+    renders it from an in-process fake OpenBao KV v2 server. The yielded dict
+    additionally contains ``user_data``: the expected rendered user-data.
+    """
+    proc, info = _launch_server(_imds_binary, "nocloud")
     yield info
     _terminate(proc)

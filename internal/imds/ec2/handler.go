@@ -2,6 +2,7 @@
 package ec2
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -9,11 +10,14 @@ import (
 	"github.com/wyattanderson/pve-imds/internal/imds"
 )
 
-type server struct{}
+type server struct {
+	userData imds.UserDataProvider
+}
 
-// NewServer returns an [imds.Server] that serves EC2-compatible IMDS responses.
-func NewServer() imds.Server {
-	return &server{}
+// NewServer returns an [imds.Server] that serves EC2-compatible IMDS
+// responses. User data is obtained from userData.
+func NewServer(userData imds.UserDataProvider) imds.Server {
+	return &server{userData: userData}
 }
 
 // NewHandler returns an http.Handler that serves EC2-compatible IMDS responses
@@ -60,9 +64,13 @@ func (s *server) NewHandler(resolver imds.Resolver, name string, ifindex int32) 
 			md := MetadataFromRecord(rec)
 			serveTree(w, rest, buildTree(md))
 		case "user-data":
-			userData, ok := imds.ParseUserData(rec.Config.Description)
-			if !ok {
+			userData, err := s.userData.UserData(req.Context(), rec)
+			switch {
+			case errors.Is(err, imds.ErrNoUserData):
 				http.NotFound(w, req)
+				return
+			case err != nil:
+				imds.WriteUserDataUnavailable(w)
 				return
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")

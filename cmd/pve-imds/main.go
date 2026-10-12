@@ -7,7 +7,9 @@ import (
 	"net"
 	"os"
 	"runtime/debug"
+	"strings"
 
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.uber.org/fx"
@@ -19,14 +21,19 @@ import (
 	"github.com/wyattanderson/pve-imds/internal/imds"
 	"github.com/wyattanderson/pve-imds/internal/imds/ec2"
 	"github.com/wyattanderson/pve-imds/internal/imds/jwtsvid"
+	"github.com/wyattanderson/pve-imds/internal/imds/nocloud"
 	"github.com/wyattanderson/pve-imds/internal/imds/openstack"
 	"github.com/wyattanderson/pve-imds/internal/logging"
 	"github.com/wyattanderson/pve-imds/internal/manager"
 	"github.com/wyattanderson/pve-imds/internal/tapwatch"
+	"github.com/wyattanderson/pve-imds/internal/userdata"
 )
 
 // version is set at build time via -ldflags "-X main.version=<ver>".
 var version = "dev"
+
+// defaultConfigFile is read when --config is not given and the file exists.
+const defaultConfigFile = "/etc/pve-imds/config.yaml"
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
@@ -66,6 +73,8 @@ func newRootCmd() *cobra.Command {
 
 func initConfig(cfgFile string) error {
 	viper.SetEnvPrefix("PVE_IMDS")
+	// Nested keys map to e.g. PVE_IMDS_SECRETS_ENABLED.
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
 	def := config.Default()
@@ -75,9 +84,22 @@ func initConfig(cfgFile string) error {
 	viper.SetDefault("jwtsvid.token_ttl", def.JWTSVID.TokenTTL)
 	viper.SetDefault("jwtsvid.nodes_dir", def.JWTSVID.NodesDir)
 	viper.SetDefault("jwtsvid.trust_domain", def.JWTSVID.TrustDomain)
+	viper.SetDefault("nocloud.enabled", def.NoCloud.Enabled)
+	viper.SetDefault("secrets.enabled", def.Secrets.Enabled)
+	viper.SetDefault("secrets.address", def.Secrets.Address)
+	viper.SetDefault("secrets.namespace", def.Secrets.Namespace)
+	viper.SetDefault("secrets.ca_file", def.Secrets.CAFile)
+	viper.SetDefault("secrets.token_file", def.Secrets.TokenFile)
+	viper.SetDefault("secrets.path_template", def.Secrets.PathTemplate)
+	viper.SetDefault("secrets.tag_prefix", def.Secrets.TagPrefix)
+	viper.SetDefault("secrets.require_registered_tags", def.Secrets.RequireRegisteredTags)
+	viper.SetDefault("secrets.cache_ttl", def.Secrets.CacheTTL)
 
 	if cfgFile == "" {
-		return nil
+		if _, err := os.Stat(defaultConfigFile); err != nil {
+			return nil
+		}
+		cfgFile = defaultConfigFile
 	}
 
 	viper.SetConfigFile(cfgFile)
@@ -90,17 +112,27 @@ func runServe() error {
 		return fmt.Errorf("unmarshal config: %w", err)
 	}
 
+	logger := logging.New(cfg.LogLevel)
+
+	userData, err := userdata.FromConfig(cfg.Secrets, afero.NewOsFs(), logger)
+	if err != nil {
+		return fmt.Errorf("configure secrets: %w", err)
+	}
+
 	var imdsServer imds.Server
 	switch cfg.Emulate {
 	case "ec2":
-		imdsServer = ec2.NewServer()
+		imdsServer = ec2.NewServer(userData)
 	case "openstack":
-		imdsServer = openstack.NewServer()
+		imdsServer = openstack.NewServer(userData)
 	default:
 		return fmt.Errorf("unsupported --emulate value %q (supported: ec2, openstack)", cfg.Emulate)
 	}
 
-	logger := logging.New(cfg.LogLevel)
+	var noCloudServer *nocloud.Server
+	if cfg.NoCloud.Enabled {
+		noCloudServer = nocloud.NewServer(userData)
+	}
 
 	if info, ok := debug.ReadBuildInfo(); ok {
 		var revision, buildTime string
@@ -138,6 +170,7 @@ func runServe() error {
 		fx.Supply(logger),
 		fxLogger,
 		fx.Provide(func() imds.Server { return imdsServer }),
+		fx.Provide(func() *nocloud.Server { return noCloudServer }),
 		fx.Provide(func(cfg config.Config) (*jwtsvid.Signer, error) {
 			return jwtsvid.NewSigner(cfg.JWTSVID)
 		}),

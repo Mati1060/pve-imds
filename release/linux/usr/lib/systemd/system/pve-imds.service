@@ -26,7 +26,11 @@ User=pve-imds
 Group=pve-imds
 DynamicUser=yes
 # www-data is necessary to read the VM configuration files in /etc/pve/qemu-server
-SupplementaryGroups=www-data
+# and pool membership and tag settings in /etc/pve/user.cfg and datacenter.cfg.
+# pve-imds-token grants read access to the OpenBao token file (secrets.token_file)
+# when templated user-data is enabled; see the README. The group is created by
+# the package's postinst script.
+SupplementaryGroups=www-data pve-imds-token
 AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_NET_RAW
 LimitMEMLOCK=infinity

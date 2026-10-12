@@ -1,6 +1,9 @@
 package imds
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 const userDataOpenTag = "<!--#user-data"
 const networkConfigOpenTag = "<!--#network-config"
@@ -17,6 +20,29 @@ func findBlockEnd(content string) int {
 		bound = idx
 	}
 	return strings.LastIndex(content[:bound], userDataCloseTag)
+}
+
+// userDataAttrRe matches the attribute list that may follow the opening
+// "<!--#user-data" tag on the same line. Only a single secrets=<set> attribute
+// is recognised; the value is captured verbatim (it may be empty or invalid)
+// so that validation, not parsing, decides whether it is acceptable.
+var userDataAttrRe = regexp.MustCompile(`^[ \t]+secrets=(\S*)[ \t]*\r?$`)
+
+// blockContent returns the raw (untrimmed) content of the block that starts
+// with openTag, or ("", false) when there is no such block or it is not
+// closed.
+func blockContent(description, openTag string) (string, bool) {
+	_, after, ok := strings.Cut(description, openTag)
+	if !ok {
+		return "", false
+	}
+
+	end := findBlockEnd(after)
+	if end < 0 {
+		return "", false
+	}
+
+	return after[:end], true
 }
 
 // ParseNetworkConfig extracts embedded network configuration from a Proxmox VM
@@ -38,17 +64,12 @@ func findBlockEnd(content string) int {
 // Returns ("", false) when no opening tag is present, no closing "-->" follows
 // the opening tag, or the trimmed content is empty.
 func ParseNetworkConfig(description string) (string, bool) {
-	_, after, ok := strings.Cut(description, networkConfigOpenTag)
+	raw, ok := blockContent(description, networkConfigOpenTag)
 	if !ok {
 		return "", false
 	}
 
-	end := findBlockEnd(after)
-	if end < 0 {
-		return "", false
-	}
-
-	content := strings.TrimSpace(after[:end])
+	content := strings.TrimSpace(raw)
 	if content == "" {
 		return "", false
 	}
@@ -78,20 +99,63 @@ func ParseNetworkConfig(description string) (string, bool) {
 // Returns ("", false) when no opening tag is present, no closing "-->" follows
 // the opening tag, or the trimmed content is empty.
 func ParseUserData(description string) (string, bool) {
-	_, after, ok := strings.Cut(description, userDataOpenTag)
+	raw, ok := blockContent(description, userDataOpenTag)
 	if !ok {
 		return "", false
 	}
 
-	end := findBlockEnd(after)
-	if end < 0 {
-		return "", false
-	}
-
-	userData := strings.TrimSpace(after[:end])
+	userData := strings.TrimSpace(raw)
 	if userData == "" {
 		return "", false
 	}
 
 	return userData, true
+}
+
+// UserDataBlock is a parsed <!--#user-data block.
+type UserDataBlock struct {
+	// Content is the block body, stripped of leading and trailing whitespace.
+	Content string
+
+	// Templated is true when the opening line declared secrets=<set>. Only
+	// templated blocks have {{ secret "..." }} placeholders rendered.
+	Templated bool
+
+	// SecretSet is the raw secrets=<set> value. It is not validated here.
+	SecretSet string
+}
+
+// ParseUserDataBlock extracts embedded user-data like [ParseUserData], and
+// additionally recognises an optional attribute on the opening line:
+//
+//	<!--#user-data secrets=worker
+//	...config with {{ secret "token" }} placeholders...
+//	-->
+//
+// The attribute must be on the same line as the opening tag and separated
+// from it by whitespace. When the rest of the opening line is anything other
+// than exactly one secrets=<set> attribute, the block is parsed exactly as
+// [ParseUserData] parses it and Templated is false.
+//
+// Returns false when there is no block or its trimmed content is empty.
+func ParseUserDataBlock(description string) (UserDataBlock, bool) {
+	raw, ok := blockContent(description, userDataOpenTag)
+	if !ok {
+		return UserDataBlock{}, false
+	}
+
+	var blk UserDataBlock
+	firstLine, rest, _ := strings.Cut(raw, "\n")
+	if m := userDataAttrRe.FindStringSubmatch(firstLine); m != nil {
+		blk.Templated = true
+		blk.SecretSet = m[1]
+		blk.Content = strings.TrimSpace(rest)
+	} else {
+		blk.Content = strings.TrimSpace(raw)
+	}
+
+	if blk.Content == "" {
+		return UserDataBlock{}, false
+	}
+	return blk, true
 }
