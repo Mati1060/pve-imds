@@ -74,6 +74,21 @@ type PXEConfig struct {
 	// record. It must contain {uuid}, the VM's SMBIOS UUID. Default:
 	// kv/data/pve-imds/pxe/{uuid}.
 	StatePathTemplate string `mapstructure:"state_path_template"`
+	// ManifestURL is the https URL of the image manifest. Required when
+	// Enabled.
+	ManifestURL string `mapstructure:"manifest_url"`
+	// ManifestCAFile is a PEM bundle used to verify the manifest server.
+	// Empty means the system trust store.
+	ManifestCAFile string `mapstructure:"manifest_ca_file"`
+	// ManifestTTL is how long a fetched manifest is reused. Default: 60s.
+	ManifestTTL time.Duration `mapstructure:"manifest_ttl"`
+	// LiveUKI is the live OS UKI that writes disk images. It is read on
+	// every request, so it can be replaced without a restart. Default:
+	// /var/lib/pve-imds/live.efi.
+	LiveUKI string `mapstructure:"live_uki"`
+	// ChainAllowedPrefixes are the URL prefixes chain images may use. Each
+	// must be https and end with "/". Default: none.
+	ChainAllowedPrefixes []string `mapstructure:"chain_allowed_prefixes"`
 }
 
 // Config holds all pve-imds configuration.
@@ -121,6 +136,8 @@ func Default() Config {
 		},
 		PXE: PXEConfig{
 			StatePathTemplate: "kv/data/pve-imds/pxe/{uuid}",
+			ManifestTTL:       60 * time.Second,
+			LiveUKI:           "/var/lib/pve-imds/live.efi",
 		},
 	}
 }
