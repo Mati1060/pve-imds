@@ -306,16 +306,12 @@ Then, once per scope and VM:
 
 ## PXE provisioning
 
-`pve-imds` can tell a VM's iPXE firmware whether to provision the VM or boot from its disk. The VM's iPXE ROM chains `http://169.254.169.254/pxe` on every boot, and `/pxe` answers with an iPXE script that either provisions the VM or runs `exit` so the firmware falls through to the local disk. `pve-imds` stays read-only towards Proxmox: the desired state is in the VM's Notes and the recorded state is in OpenBao.
+`pve-imds` can provision VMs over iPXE. The VM's iPXE ROM chains `http://169.254.169.254/pxe` on every boot, and `/pxe` answers with an iPXE script that either provisions the VM or runs `exit` so the firmware falls through to the local disk. `pve-imds` stays read-only towards Proxmox: the desired state is in the VM's Notes, the available images are in a manifest, and the recorded state is in OpenBao.
 
-This currently only makes the decision. The provision script is a placeholder that prints what it would do, waits ten seconds and exits:
+There are two image types:
 
-```
-#!ipxe
-echo pve-imds: would provision debian13 2026.10.01 for vm 500
-sleep 10
-exit
-```
+- **disk**: a `raw.zst` disk image. `/pxe` chains a live OS (a UKI served by `pve-imds` at `/pxe/live.efi`). The live OS fetches `/pxe/job`, writes the image to the VM's disk and reports it with `POST /pxe/done`, which records the VM as provisioned.
+- **chain**: a remote iPXE target, such as a [Talos Image Factory](https://factory.talos.dev/) URL. `/pxe` answers `chain <url>`. With `boot: once` (the default) the VM is recorded as provisioned just before the chain, so it boots from disk afterwards; with `boot: always` it is chained on every boot and no state is kept.
 
 ### The `<!--#pxe` block
 
@@ -324,29 +320,86 @@ The desired state is a YAML block in the VM's Notes:
 ```
 <!--#pxe
 image: debian13        # required
-version: 2026.10.01    # optional; omit for the latest version
+version: 2026.10.01    # optional; omit for the manifest's latest version
+disk: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0   # optional, disk images only
 -->
 ```
 
-`image` and `version` may only contain `a-z`, `0-9`, `.`, `_` and `-`. Any other key, invalid YAML, a missing `image` or a value outside that charset makes the block invalid, which is treated like no block and logged as a warning with the VMID and the reason.
+`image` and `version` may only contain `a-z`, `0-9`, `.`, `_` and `-`. `disk` must match `^/dev/disk/by-id/[A-Za-z0-9._:-]+$` and defaults to the VM's first SCSI disk. Any other key, invalid YAML, a missing `image` or an invalid value makes the block invalid, which is treated like no block and logged as a warning with the VMID and the reason.
+
+### The manifest
+
+The manifest lists the images and their versions. `pve-imds` fetches it from `pxe.manifest_url` over HTTPS and reuses it for `pxe.manifest_ttl`. Redirects are not followed. Failed fetches are not cached, and an expired manifest is never served when a fetch fails: the VM boots from disk instead.
+
+```json
+{
+  "images": {
+    "debian13": {
+      "type": "disk",
+      "latest": "2026.10.01",
+      "versions": {
+        "2026.10.01": {
+          "url": "https://rgw.example.com/pxe/debian13/2026.10.01.raw.zst",
+          "sha256": "<64 hex characters>",
+          "size": 123456789
+        }
+      }
+    },
+    "talos": {
+      "type": "chain",
+      "boot": "once",
+      "latest": "v1.14.2",
+      "versions": {
+        "v1.14.2": { "url": "https://pxe.factory.talos.dev/pxe/<schematic>/v1.14.2/nocloud-amd64-secureboot" }
+      }
+    }
+  }
+}
+```
+
+- Image IDs and versions use the same charset as the Notes block.
+- A disk version needs an `https` `url`, a 64-hex `sha256` and a `size` greater than 0.
+- A chain version needs a `url` that starts with one of `pxe.chain_allowed_prefixes`, and nothing else. The allowlist is checked again whenever a URL is chained.
+- `boot` is `once` (default) or `always`, and only valid for chain images.
+- `latest` must be one of `versions`.
+- URLs must be `https`, without user info, `.` or `..` path segments, `$` or whitespace, so they are safe to put into an iPXE script.
+- Unknown keys are rejected. An invalid image or version is skipped and logged as a warning; the rest of the manifest is still used. An image whose `latest` is skipped is skipped as a whole. A manifest that isn't valid JSON of this shape is an error.
 
 ### Recorded state
 
-The recorded state of a VM is a KV v2 entry at `kv/data/pve-imds/pxe/<uuid>`, keyed by the VM's SMBIOS UUID (lowercased). It never falls back to the VMID, because VMIDs get reused. The entry has the string fields `image`, `version`, `sha256` and `provisioned_at` (RFC 3339). State reads are never cached.
+The recorded state of a VM is a KV v2 entry at `kv/data/pve-imds/pxe/<uuid>`, keyed by the VM's SMBIOS UUID (lowercased). It never falls back to the VMID, because VMIDs get reused. The entry has the string fields `image`, `version`, `sha256` (empty for chain images), `provisioned_at` (RFC 3339) and `method` (`disk` or `chain`). State reads are never cached.
 
 ### Decision
 
-| Situation | Response |
-|---|---|
-| The VM cannot be identified, or has no valid SMBIOS UUID | `exit` |
-| No valid `<!--#pxe` block | `exit` |
-| Reading the state fails (OpenBao unreachable, token rejected, ...) | `exit` |
-| No record | provision |
-| The record's `image` differs from the block's | provision |
-| The block sets `version` and it differs from the record's | provision |
-| Otherwise | `exit` |
+`/pxe` first resolves the block's image and version (or the manifest's `latest`), then compares it with the record:
 
-A VM without a `version` is provisioned with the latest version once and is then left alone: a newer image never reprovisions it. Every response is a `200` with `Content-Type: text/plain` and `Cache-Control: no-store`, even when `pve-imds` hits an error, because iPXE treats any other status as a failure and retries instead of booting. Each request logs one line with the VMID, UUID, image, version and an `outcome` of `no_identity`, `no_uuid`, `no_block`, `state_error`, `provision_new`, `provision_changed` or `provisioned`.
+| Situation | Response | `outcome` |
+|---|---|---|
+| The VM cannot be identified, or has no valid SMBIOS UUID | `exit` | `no_identity`, `no_uuid` |
+| No valid `<!--#pxe` block | `exit` | `no_block` |
+| The manifest cannot be fetched | `exit` | `manifest_error` |
+| The image or version is not in the manifest | `exit` | `manifest_miss` |
+| Chain image with `boot: always` | `chain <url>` (no state read or write) | `chain_always` |
+| Reading the state fails | `exit` | `state_error` |
+| The record matches: same image, and the pinned version (if any) is the recorded one | `exit` | `provisioned` |
+| Otherwise, disk image | `chain /pxe/live.efi` (`exit` if `live_uki` is unreadable) | `provision_new`, `provision_changed` (`live_uki_missing`) |
+| Otherwise, chain image with `boot: once` | write the record, then `chain <url>` (`exit` if the write fails) | `chain_once` (`state_error`) |
+
+A VM without a `version` is provisioned with the latest version once and then left alone: a newer `latest` never reprovisions it. Every `/pxe` response is a `200` with `Content-Type: text/plain` and `Cache-Control: no-store`, even when `pve-imds` hits an error, because iPXE treats any other status as a failure and retries instead of booting. Every request to a PXE endpoint logs one line with the VMID, UUID, image, version and `outcome`; failures also log a warning with the reason.
+
+### The live OS endpoints
+
+These only serve the VM the request comes from, like every other endpoint.
+
+| Endpoint | Response |
+|---|---|
+| `GET /pxe/live.efi` | The `live_uki` file (`application/octet-stream`, `Cache-Control: no-store`), read on every request so it can be replaced without a restart. Only while the VM's decision is to provision a disk image; otherwise `404`. |
+| `GET /pxe/job` | `{"image", "version", "url", "sha256", "size", "disk"}` for the version resolved now. Only while the VM's decision is to provision a disk image; otherwise `409` with `{"error", "outcome"}`. |
+| `POST /pxe/done` | Body `{"image", "version", "sha256"}`. `204` once recorded; `409` if `image` isn't the block's, `version` isn't the pinned one, or the version or `sha256` doesn't match the manifest; `503` with `Retry-After` if OpenBao or the manifest is unavailable; `400` for a malformed body. A repeated identical report is `204` without a new write. |
+
+No job state is kept between `/pxe/job` and `/pxe/done`: the report is checked against the Notes and the manifest as they are when it arrives. If `latest` moved while an unpinned VM was installing, the report of the older version is still accepted as long as that version is in the manifest.
+
+### Reprovisioning
 
 To reprovision a VM, change `image` or `version` in its Notes, or delete its record:
 
@@ -356,25 +409,34 @@ bao kv delete kv/pve-imds/pxe/<uuid>
 
 ### Setting it up
 
-Enable the endpoint in `/etc/pve-imds/config.yaml`. It connects with the `address`, `token_file`, `ca_file` and `namespace` of the `secrets` section, which must have at least `address` and `token_file`; `secrets.enabled` (templating) does not need to be on.
+1. Configure `/etc/pve-imds/config.yaml`. The state store connects with the `address`, `token_file`, `ca_file` and `namespace` of the `secrets` section, which must have at least `address` and `token_file`; `secrets.enabled` (templating) does not need to be on.
 
-```yaml
-pxe:
-  enabled: true
-secrets:
-  address: https://openbao.example.com:8200
-  token_file: /run/openbao-agent-pve-imds/token
-```
+   ```yaml
+   pxe:
+     enabled: true
+     manifest_url: https://rgw.example.com/pxe/manifest.json
+     chain_allowed_prefixes:
+       - https://pxe.factory.talos.dev/pxe/
+   secrets:
+     address: https://openbao.example.com:8200
+     token_file: /run/openbao-agent-pve-imds/token
+   ```
 
-Add this to the policy of the `pve-imds` token:
+   `pve-imds` refuses to start if `manifest_url` isn't `https`, or if an allowed prefix isn't `https` or doesn't end with `/`. The trailing `/` keeps a prefix from matching a sibling path such as `/pxe-other/`.
 
-```hcl
-path "kv/data/pve-imds/pxe/*" {
-  capabilities = ["read", "create", "update"]
-}
-```
+2. Copy the live OS UKI to `/var/lib/pve-imds/live.efi` (the service's state directory) on every node and make it readable. It can be replaced at any time.
 
-`delete` is deliberately left out: deleting a record makes the VM reprovision on its next boot, so only an operator should be able to do that.
+3. Add this to the policy of the `pve-imds` token:
+
+   ```hcl
+   path "kv/data/pve-imds/pxe/*" {
+     capabilities = ["read", "create", "update"]
+   }
+   ```
+
+   `delete` is deliberately left out: deleting a record makes the VM reprovision on its next boot, so only an operator should be able to do that.
+
+The service unit only allows IPv4 sockets. If the manifest server is only reachable over IPv6, add `AF_INET6` with the same drop-in as for [OpenBao](#token-and-openbao-agent).
 
 ## Configuration
 
@@ -396,9 +458,17 @@ secrets:
   cache_ttl: 60s           # how long a fetched secret set is reused
 
 pxe:
-  enabled: false           # serve /pxe (default: false); uses the secrets connection settings
+  enabled: false           # serve /pxe and the live OS endpoints (default: false); uses the secrets connection settings
   state_path_template: kv/data/pve-imds/pxe/{uuid}  # API path below /v1/; must contain {uuid}
+  manifest_url: https://rgw.example.com/pxe/manifest.json  # required when enabled; must be https
+  manifest_ca_file: ""     # optional; default: system CAs
+  manifest_ttl: 60s        # how long a fetched manifest is reused
+  live_uki: /var/lib/pve-imds/live.efi  # live OS UKI served at /pxe/live.efi
+  chain_allowed_prefixes:  # URL prefixes chain images may use; https, ending in /
+    - https://pxe.factory.talos.dev/pxe/
 ```
+
+`PVE_IMDS_PXE_CHAIN_ALLOWED_PREFIXES` takes a comma-separated list.
 
 `path_template` is the KV v2 API path, so it includes the mount's `data/` segment. It must contain `{name}` and exactly one of `{pool}` or `{tag}`. Secret sets are cached per scope and set for `cache_ttl`; errors are never cached.
 
