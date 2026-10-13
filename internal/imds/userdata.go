@@ -1,12 +1,19 @@
 package imds
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 const userDataOpenTag = "<!--#user-data"
 const networkConfigOpenTag = "<!--#network-config"
+const pxeOpenTag = "<!--#pxe"
 const blockPrefix = "<!--#"
 const userDataCloseTag = "-->"
 
@@ -75,6 +82,72 @@ func ParseNetworkConfig(description string) (string, bool) {
 	}
 
 	return content, true
+}
+
+// pxeNameRe is the charset allowed for a <!--#pxe image and version. It
+// keeps both safe to interpolate into iPXE scripts.
+var pxeNameRe = regexp.MustCompile(`^[a-z0-9._-]+$`)
+
+var (
+	// ErrNoPXEBlock is returned by [ParsePXEBlock] when the description has
+	// no closed <!--#pxe block.
+	ErrNoPXEBlock = errors.New("no pxe block")
+
+	// ErrInvalidPXEBlock is returned by [ParsePXEBlock] when a <!--#pxe
+	// block is present but its content is not valid.
+	ErrInvalidPXEBlock = errors.New("invalid pxe block")
+)
+
+// PXEBlock is a parsed <!--#pxe block: the image a VM should be provisioned
+// with.
+type PXEBlock struct {
+	// Image names the image to provision. It always matches
+	// ^[a-z0-9._-]+$.
+	Image string `yaml:"image"`
+
+	// Version pins the image version. Empty means "latest", which only
+	// applies at first provisioning. When set it matches ^[a-z0-9._-]+$.
+	Version string `yaml:"version"`
+}
+
+// ParsePXEBlock extracts the desired provisioning state from a Proxmox VM
+// description. The block uses the same HTML comment convention as
+// network-config and wraps a YAML mapping:
+//
+//	<!--#pxe
+//	image: debian13        # required
+//	version: 2026.10.01    # optional
+//	-->
+//
+// Unknown keys are rejected. It returns an error wrapping [ErrNoPXEBlock]
+// when there is no closed block, and one wrapping [ErrInvalidPXEBlock] that
+// names the reason when the content is not valid YAML, image is missing or
+// either value is outside ^[a-z0-9._-]+$.
+func ParsePXEBlock(description string) (PXEBlock, error) {
+	raw, ok := blockContent(description, pxeOpenTag)
+	if !ok {
+		return PXEBlock{}, ErrNoPXEBlock
+	}
+
+	var blk PXEBlock
+	dec := yaml.NewDecoder(bytes.NewReader([]byte(raw)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&blk); err != nil {
+		if errors.Is(err, io.EOF) {
+			return PXEBlock{}, fmt.Errorf("%w: image is required", ErrInvalidPXEBlock)
+		}
+		return PXEBlock{}, fmt.Errorf("%w: %w", ErrInvalidPXEBlock, err)
+	}
+
+	switch {
+	case blk.Image == "":
+		return PXEBlock{}, fmt.Errorf("%w: image is required", ErrInvalidPXEBlock)
+	case !pxeNameRe.MatchString(blk.Image):
+		return PXEBlock{}, fmt.Errorf("%w: image %q must match %s", ErrInvalidPXEBlock, blk.Image, pxeNameRe)
+	case blk.Version != "" && !pxeNameRe.MatchString(blk.Version):
+		return PXEBlock{}, fmt.Errorf("%w: version %q must match %s", ErrInvalidPXEBlock, blk.Version, pxeNameRe)
+	}
+	return blk, nil
 }
 
 // ParseUserData extracts embedded user-data from a Proxmox VM description.

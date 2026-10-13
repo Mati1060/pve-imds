@@ -304,9 +304,81 @@ Then, once per scope and VM:
 5. Add `secrets=<set>` and the `{{ secret "<field>" }}` placeholders to the VM's `<!--#user-data` block.
 6. Check the result from inside the VM with `curl -i http://169.254.169.254/nocloud/user-data`. A 503 means rendering failed; the `pve-imds` log on the VM's node has the reason as `outcome` (for example `vm_not_in_pool`, `tag_not_registered` or `secret_fetch_failed`).
 
+## PXE provisioning
+
+`pve-imds` can tell a VM's iPXE firmware whether to provision the VM or boot from its disk. The VM's iPXE ROM chains `http://169.254.169.254/pxe` on every boot, and `/pxe` answers with an iPXE script that either provisions the VM or runs `exit` so the firmware falls through to the local disk. `pve-imds` stays read-only towards Proxmox: the desired state is in the VM's Notes and the recorded state is in OpenBao.
+
+This currently only makes the decision. The provision script is a placeholder that prints what it would do, waits ten seconds and exits:
+
+```
+#!ipxe
+echo pve-imds: would provision debian13 2026.10.01 for vm 500
+sleep 10
+exit
+```
+
+### The `<!--#pxe` block
+
+The desired state is a YAML block in the VM's Notes:
+
+```
+<!--#pxe
+image: debian13        # required
+version: 2026.10.01    # optional; omit for the latest version
+-->
+```
+
+`image` and `version` may only contain `a-z`, `0-9`, `.`, `_` and `-`. Any other key, invalid YAML, a missing `image` or a value outside that charset makes the block invalid, which is treated like no block and logged as a warning with the VMID and the reason.
+
+### Recorded state
+
+The recorded state of a VM is a KV v2 entry at `kv/data/pve-imds/pxe/<uuid>`, keyed by the VM's SMBIOS UUID (lowercased). It never falls back to the VMID, because VMIDs get reused. The entry has the string fields `image`, `version`, `sha256` and `provisioned_at` (RFC 3339). State reads are never cached.
+
+### Decision
+
+| Situation | Response |
+|---|---|
+| The VM cannot be identified, or has no valid SMBIOS UUID | `exit` |
+| No valid `<!--#pxe` block | `exit` |
+| Reading the state fails (OpenBao unreachable, token rejected, ...) | `exit` |
+| No record | provision |
+| The record's `image` differs from the block's | provision |
+| The block sets `version` and it differs from the record's | provision |
+| Otherwise | `exit` |
+
+A VM without a `version` is provisioned with the latest version once and is then left alone: a newer image never reprovisions it. Every response is a `200` with `Content-Type: text/plain` and `Cache-Control: no-store`, even when `pve-imds` hits an error, because iPXE treats any other status as a failure and retries instead of booting. Each request logs one line with the VMID, UUID, image, version and an `outcome` of `no_identity`, `no_uuid`, `no_block`, `state_error`, `provision_new`, `provision_changed` or `provisioned`.
+
+To reprovision a VM, change `image` or `version` in its Notes, or delete its record:
+
+```bash
+bao kv delete kv/pve-imds/pxe/<uuid>
+```
+
+### Setting it up
+
+Enable the endpoint in `/etc/pve-imds/config.yaml`. It connects with the `address`, `token_file`, `ca_file` and `namespace` of the `secrets` section, which must have at least `address` and `token_file`; `secrets.enabled` (templating) does not need to be on.
+
+```yaml
+pxe:
+  enabled: true
+secrets:
+  address: https://openbao.example.com:8200
+  token_file: /run/openbao-agent-pve-imds/token
+```
+
+Add this to the policy of the `pve-imds` token:
+
+```hcl
+path "kv/data/pve-imds/pxe/*" {
+  capabilities = ["read", "create", "update"]
+}
+```
+
+`delete` is deliberately left out: deleting a record makes the VM reprovision on its next boot, so only an operator should be able to do that.
+
 ## Configuration
 
-`pve-imds` reads `/etc/pve-imds/config.yaml` if it exists (or the file given with `--config`). Every option can also be set with an environment variable, e.g. `PVE_IMDS_SECRETS_ENABLED=true`. The options for NoCloud and templated user-data:
+`pve-imds` reads `/etc/pve-imds/config.yaml` if it exists (or the file given with `--config`). Every option can also be set with an environment variable, e.g. `PVE_IMDS_SECRETS_ENABLED=true`. The options for NoCloud, templated user-data and PXE provisioning:
 
 ```yaml
 nocloud:
@@ -322,6 +394,10 @@ secrets:
   tag_prefix: pve-imds-    # with {tag}: the tag that selects the scope
   require_registered_tags: true  # with {tag}: only trust registered tags
   cache_ttl: 60s           # how long a fetched secret set is reused
+
+pxe:
+  enabled: false           # serve /pxe (default: false); uses the secrets connection settings
+  state_path_template: kv/data/pve-imds/pxe/{uuid}  # API path below /v1/; must contain {uuid}
 ```
 
 `path_template` is the KV v2 API path, so it includes the mount's `data/` segment. It must contain `{name}` and exactly one of `{pool}` or `{tag}`. Secret sets are cached per scope and set for `cache_ttl`; errors are never cached.

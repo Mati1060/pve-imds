@@ -63,6 +63,19 @@ type SecretsConfig struct {
 	CacheTTL time.Duration `mapstructure:"cache_ttl"`
 }
 
+// PXEConfig holds configuration for the /pxe endpoint, which tells iPXE
+// whether to provision a VM or boot from disk. Provisioning state is kept in
+// OpenBao, reached with the connection settings of [SecretsConfig].
+type PXEConfig struct {
+	// Enabled serves GET /pxe. It does not require Secrets.Enabled, but
+	// Secrets.Address and Secrets.TokenFile must be set. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// StatePathTemplate is the API path (below /v1/) of a VM's provisioning
+	// record. It must contain {uuid}, the VM's SMBIOS UUID. Default:
+	// kv/data/pve-imds/pxe/{uuid}.
+	StatePathTemplate string `mapstructure:"state_path_template"`
+}
+
 // Config holds all pve-imds configuration.
 type Config struct {
 	// LogLevel is the minimum log level to emit (debug, info, warn, error).
@@ -81,6 +94,8 @@ type Config struct {
 	NoCloud NoCloudConfig `mapstructure:"nocloud"`
 	// Secrets holds configuration for templated user-data.
 	Secrets SecretsConfig `mapstructure:"secrets"`
+	// PXE holds configuration for the /pxe endpoint.
+	PXE PXEConfig `mapstructure:"pxe"`
 }
 
 // Default returns a Config with sensible defaults.
@@ -103,6 +118,9 @@ func Default() Config {
 			TagPrefix:             "pve-imds-",
 			RequireRegisteredTags: true,
 			CacheTTL:              60 * time.Second,
+		},
+		PXE: PXEConfig{
+			StatePathTemplate: "kv/data/pve-imds/pxe/{uuid}",
 		},
 	}
 }
