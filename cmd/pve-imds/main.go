@@ -23,8 +23,10 @@ import (
 	"github.com/wyattanderson/pve-imds/internal/imds/jwtsvid"
 	"github.com/wyattanderson/pve-imds/internal/imds/nocloud"
 	"github.com/wyattanderson/pve-imds/internal/imds/openstack"
+	"github.com/wyattanderson/pve-imds/internal/imds/pxe"
 	"github.com/wyattanderson/pve-imds/internal/logging"
 	"github.com/wyattanderson/pve-imds/internal/manager"
+	"github.com/wyattanderson/pve-imds/internal/pxestate"
 	"github.com/wyattanderson/pve-imds/internal/tapwatch"
 	"github.com/wyattanderson/pve-imds/internal/userdata"
 )
@@ -136,6 +138,15 @@ func runServe() error {
 		noCloudServer = nocloud.NewServer(userData)
 	}
 
+	pxeState, err := pxestate.FromConfig(cfg.PXE, cfg.Secrets)
+	if err != nil {
+		return fmt.Errorf("configure pxe: %w", err)
+	}
+	var pxeServer *pxe.Server
+	if pxeState != nil {
+		pxeServer = pxe.NewServer(logger, pxeState)
+	}
+
 	if info, ok := debug.ReadBuildInfo(); ok {
 		var revision, buildTime string
 		for _, s := range info.Settings {
@@ -173,6 +184,7 @@ func runServe() error {
 		fxLogger,
 		fx.Provide(func() imds.Server { return imdsServer }),
 		fx.Provide(func() *nocloud.Server { return noCloudServer }),
+		fx.Provide(func() *pxe.Server { return pxeServer }),
 		fx.Provide(func(cfg config.Config) (*jwtsvid.Signer, error) {
 			return jwtsvid.NewSigner(cfg.JWTSVID)
 		}),

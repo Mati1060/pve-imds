@@ -24,6 +24,7 @@ import (
 	"github.com/wyattanderson/pve-imds/internal/imds"
 	"github.com/wyattanderson/pve-imds/internal/imds/jwtsvid"
 	"github.com/wyattanderson/pve-imds/internal/imds/nocloud"
+	"github.com/wyattanderson/pve-imds/internal/imds/pxe"
 	"github.com/wyattanderson/pve-imds/internal/manager"
 	"github.com/wyattanderson/pve-imds/internal/xdp"
 )
@@ -58,22 +59,24 @@ type Runtime struct {
 	server   imds.Server
 	signer   *jwtsvid.Signer
 	nocloud  *nocloud.Server // nil when the NoCloud endpoint is disabled
+	pxe      *pxe.Server     // nil when the /pxe endpoint is disabled
 	ifindex  int32           // primary identifier
 	name     string          // for logging/debugging only
 }
 
-// New constructs a Runtime for the given tap interface. noCloud may be nil
-// to disable the NoCloud endpoint.
-func New(log *slog.Logger, resolver *identity.Resolver, server imds.Server, signer *jwtsvid.Signer, noCloud *nocloud.Server, ifindex int32, name string) *Runtime {
-	return &Runtime{log: log, resolver: resolver, server: server, signer: signer, nocloud: noCloud, ifindex: ifindex, name: name}
+// New constructs a Runtime for the given tap interface. noCloud and pxeServer
+// may be nil to disable the NoCloud and /pxe endpoints.
+func New(log *slog.Logger, resolver *identity.Resolver, server imds.Server, signer *jwtsvid.Signer, noCloud *nocloud.Server, pxeServer *pxe.Server, ifindex int32, name string) *Runtime {
+	return &Runtime{log: log, resolver: resolver, server: server, signer: signer, nocloud: noCloud, pxe: pxeServer, ifindex: ifindex, name: name}
 }
 
 // NewFactory returns a manager.RuntimeFactory that constructs a Runtime for
 // each tap interface, sharing the provided logger, identity resolver, IMDS
-// server, JWT-SVID signer, and NoCloud server (nil when disabled).
-func NewFactory(log *slog.Logger, resolver *identity.Resolver, server imds.Server, signer *jwtsvid.Signer, noCloud *nocloud.Server) manager.RuntimeFactory {
+// server, JWT-SVID signer, NoCloud server and /pxe server (each nil when
+// disabled).
+func NewFactory(log *slog.Logger, resolver *identity.Resolver, server imds.Server, signer *jwtsvid.Signer, noCloud *nocloud.Server, pxeServer *pxe.Server) manager.RuntimeFactory {
 	return func(ifindex int32, name string) manager.InterfaceRuntime {
-		return New(log, resolver, server, signer, noCloud, ifindex, name)
+		return New(log, resolver, server, signer, noCloud, pxeServer, ifindex, name)
 	}
 }
 
@@ -136,6 +139,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 		nc := r.nocloud.NewHandler(r.resolver, r.name, r.ifindex)
 		mux.Handle(nocloud.Prefix, nc)
 		mux.Handle(nocloud.Prefix+"/", nc)
+	}
+	if r.pxe != nil {
+		mux.Handle("GET "+pxe.Path, r.pxe.NewHandler(r.resolver, r.name, r.ifindex))
 	}
 	mux.Handle("/", base)
 
