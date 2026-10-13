@@ -130,12 +130,13 @@ func TestGet(t *testing.T) {
 	}{
 		{
 			name: "found",
-			body: `{"data":{"data":{"image":"debian13","version":"2026.10.01","sha256":"ab12","provisioned_at":"2026-10-13T18:00:00Z"},"metadata":{"version":3}}}`,
+			body: `{"data":{"data":{"image":"debian13","version":"2026.10.01","sha256":"ab12","provisioned_at":"2026-10-13T18:00:00Z","method":"disk"},"metadata":{"version":3}}}`,
 			want: Record{
 				Image:         "debian13",
 				Version:       "2026.10.01",
 				SHA256:        "ab12",
 				ProvisionedAt: time.Date(2026, 10, 13, 18, 0, 0, 0, time.UTC),
+				Method:        "disk",
 			},
 			wantFound: true,
 		},
@@ -243,6 +244,7 @@ func TestPut(t *testing.T) {
 		Version:       "2026.10.01",
 		SHA256:        "ab12",
 		ProvisionedAt: at,
+		Method:        "chain",
 	})
 	require.NoError(t, err)
 
@@ -251,6 +253,7 @@ func TestPut(t *testing.T) {
 		"version":        "2026.10.01",
 		"sha256":         "ab12",
 		"provisioned_at": "2026-10-13T18:00:00Z",
+		"method":         "chain",
 	}, f.writes[testPath])
 	req := f.requests()[0]
 	assert.Equal(t, http.MethodPost, req.Method)
@@ -260,7 +263,7 @@ func TestPut(t *testing.T) {
 func TestPutRoundTrip(t *testing.T) {
 	f := newFakeKV(t)
 	s := newStore(t, f, 0)
-	want := Record{Image: "debian13", Version: "v1", SHA256: "x", ProvisionedAt: time.Date(2026, 10, 13, 18, 0, 0, 0, time.UTC)}
+	want := Record{Image: "debian13", Version: "v1", SHA256: "x", ProvisionedAt: time.Date(2026, 10, 13, 18, 0, 0, 0, time.UTC), Method: "disk"}
 	require.NoError(t, s.Put(context.Background(), testUUID, want))
 
 	data, err := json.Marshal(map[string]any{"data": map[string]any{"data": f.writes[testPath]}})
