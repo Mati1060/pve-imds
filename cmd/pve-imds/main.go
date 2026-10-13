@@ -26,6 +26,7 @@ import (
 	"github.com/wyattanderson/pve-imds/internal/imds/pxe"
 	"github.com/wyattanderson/pve-imds/internal/logging"
 	"github.com/wyattanderson/pve-imds/internal/manager"
+	"github.com/wyattanderson/pve-imds/internal/provision"
 	"github.com/wyattanderson/pve-imds/internal/pxestate"
 	"github.com/wyattanderson/pve-imds/internal/tapwatch"
 	"github.com/wyattanderson/pve-imds/internal/userdata"
@@ -149,7 +150,11 @@ func runServe() error {
 	}
 	var pxeServer *pxe.Server
 	if pxeState != nil {
-		pxeServer = pxe.NewServer(logger, pxeState)
+		prov, err := provision.FromConfig(cfg.PXE, pxeState, pxe.LiveUKIPath, logger)
+		if err != nil {
+			return fmt.Errorf("configure pxe: %w", err)
+		}
+		pxeServer = pxe.NewServer(logger, prov, cfg.PXE.LiveUKI)
 	}
 
 	if info, ok := debug.ReadBuildInfo(); ok {

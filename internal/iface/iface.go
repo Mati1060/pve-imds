@@ -59,7 +59,7 @@ type Runtime struct {
 	server   imds.Server
 	signer   *jwtsvid.Signer
 	nocloud  *nocloud.Server // nil when the NoCloud endpoint is disabled
-	pxe      *pxe.Server     // nil when the /pxe endpoint is disabled
+	pxe      *pxe.Server     // nil when the PXE endpoints are disabled
 	ifindex  int32           // primary identifier
 	name     string          // for logging/debugging only
 }
@@ -141,7 +141,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 		mux.Handle(nocloud.Prefix+"/", nc)
 	}
 	if r.pxe != nil {
-		mux.Handle("GET "+pxe.Path, r.pxe.NewHandler(r.resolver, r.name, r.ifindex))
+		r.pxe.Register(mux, r.resolver, r.name, r.ifindex)
 	}
 	mux.Handle("/", base)
 
