@@ -94,6 +94,8 @@ func initConfig(cfgFile string) error {
 	viper.SetDefault("secrets.tag_prefix", def.Secrets.TagPrefix)
 	viper.SetDefault("secrets.require_registered_tags", def.Secrets.RequireRegisteredTags)
 	viper.SetDefault("secrets.cache_ttl", def.Secrets.CacheTTL)
+	viper.SetDefault("pxe.enabled", def.PXE.Enabled)
+	viper.SetDefault("pxe.state_path_template", def.PXE.StatePathTemplate)
 
 	if cfgFile == "" {
 		if _, err := os.Stat(defaultConfigFile); err != nil {

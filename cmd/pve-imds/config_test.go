@@ -38,6 +38,8 @@ func TestConfigDefaults(t *testing.T) {
 	assert.Equal(t, "pve-imds-", cfg.Secrets.TagPrefix)
 	assert.True(t, cfg.Secrets.RequireRegisteredTags)
 	assert.Equal(t, 60*time.Second, cfg.Secrets.CacheTTL)
+	assert.False(t, cfg.PXE.Enabled)
+	assert.Equal(t, "kv/data/pve-imds/pxe/{uuid}", cfg.PXE.StatePathTemplate)
 }
 
 func TestConfigFile(t *testing.T) {
@@ -54,6 +56,9 @@ secrets:
   tag_prefix: secrets-
   require_registered_tags: false
   cache_ttl: 15s
+pxe:
+  enabled: true
+  state_path_template: secret/data/pxe/{uuid}
 `)
 	assert.False(t, cfg.NoCloud.Enabled)
 	assert.Equal(t, config.SecretsConfig{
@@ -67,14 +72,22 @@ secrets:
 		RequireRegisteredTags: false,
 		CacheTTL:              15 * time.Second,
 	}, cfg.Secrets)
+	assert.Equal(t, config.PXEConfig{
+		Enabled:           true,
+		StatePathTemplate: "secret/data/pxe/{uuid}",
+	}, cfg.PXE)
 }
 
 func TestConfigEnv(t *testing.T) {
 	t.Setenv("PVE_IMDS_SECRETS_ENABLED", "true")
 	t.Setenv("PVE_IMDS_SECRETS_NAMESPACE", "ns1")
 	t.Setenv("PVE_IMDS_NOCLOUD_ENABLED", "false")
+	t.Setenv("PVE_IMDS_PXE_ENABLED", "true")
+	t.Setenv("PVE_IMDS_PXE_STATE_PATH_TEMPLATE", "kv/data/x/{uuid}")
 	cfg := loadConfig(t, "")
 	assert.True(t, cfg.Secrets.Enabled)
 	assert.Equal(t, "ns1", cfg.Secrets.Namespace)
 	assert.False(t, cfg.NoCloud.Enabled)
+	assert.True(t, cfg.PXE.Enabled)
+	assert.Equal(t, "kv/data/x/{uuid}", cfg.PXE.StatePathTemplate)
 }
