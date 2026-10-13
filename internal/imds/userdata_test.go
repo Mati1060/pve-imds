@@ -232,32 +232,57 @@ func TestParsePXEBlock(t *testing.T) {
 		{
 			name: "image only",
 			desc: "<!--#pxe\nimage: debian13\n-->",
-			want: PXEBlock{Image: "debian13"},
+			want: PXEBlock{Image: "debian13", Disk: DefaultPXEDisk},
 		},
 		{
 			name: "image and version",
 			desc: "<!--#pxe\nimage: debian13\nversion: 2026.10.01\n-->",
-			want: PXEBlock{Image: "debian13", Version: "2026.10.01"},
+			want: PXEBlock{Image: "debian13", Version: "2026.10.01", Disk: DefaultPXEDisk},
 		},
 		{
 			name: "comments and surrounding text",
 			desc: "web server\n\n<!--#pxe\nimage: debian13 # required\nversion: 2026.10.01\n-->\nmore notes",
-			want: PXEBlock{Image: "debian13", Version: "2026.10.01"},
+			want: PXEBlock{Image: "debian13", Version: "2026.10.01", Disk: DefaultPXEDisk},
 		},
 		{
 			name: "numeric-looking values keep their text",
 			desc: "<!--#pxe\nimage: 13\nversion: 2026.10\n-->",
-			want: PXEBlock{Image: "13", Version: "2026.10"},
+			want: PXEBlock{Image: "13", Version: "2026.10", Disk: DefaultPXEDisk},
 		},
 		{
 			name: "empty version is unpinned",
 			desc: "<!--#pxe\nimage: debian13\nversion:\n-->",
-			want: PXEBlock{Image: "debian13"},
+			want: PXEBlock{Image: "debian13", Disk: DefaultPXEDisk},
 		},
 		{
 			name: "coexists with user-data and network-config",
 			desc: "<!--#user-data\n#cloud-config\n-->\n<!--#pxe\nimage: debian13\n-->\n<!--#network-config\nnetwork:\n  version: 2\n-->",
-			want: PXEBlock{Image: "debian13"},
+			want: PXEBlock{Image: "debian13", Disk: DefaultPXEDisk},
+		},
+		{
+			name: "custom disk",
+			desc: "<!--#pxe\nimage: debian13\ndisk: /dev/disk/by-id/virtio-data:01_a.b\n-->",
+			want: PXEBlock{Image: "debian13", Disk: "/dev/disk/by-id/virtio-data:01_a.b"},
+		},
+		{
+			name:    "disk outside by-id",
+			desc:    "<!--#pxe\nimage: debian13\ndisk: /dev/sda\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "disk with traversal",
+			desc:    "<!--#pxe\nimage: debian13\ndisk: /dev/disk/by-id/..\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "disk in a subdirectory",
+			desc:    "<!--#pxe\nimage: debian13\ndisk: /dev/disk/by-id/a/b\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "disk with space",
+			desc:    "<!--#pxe\nimage: debian13\ndisk: \"/dev/disk/by-id/a b\"\n-->",
+			wantErr: ErrInvalidPXEBlock,
 		},
 		{
 			name:    "no block",

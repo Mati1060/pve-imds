@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"strings"
 
@@ -88,6 +89,13 @@ func ParseNetworkConfig(description string) (string, bool) {
 // keeps both safe to interpolate into iPXE scripts.
 var pxeNameRe = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
+// pxeDiskRe is the form of a <!--#pxe disk: a stable /dev/disk/by-id path.
+var pxeDiskRe = regexp.MustCompile(`^/dev/disk/by-id/[A-Za-z0-9._:-]+$`)
+
+// DefaultPXEDisk is the disk a <!--#pxe block installs to when it names
+// none: the first SCSI disk of a Proxmox VM.
+const DefaultPXEDisk = "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0"
+
 var (
 	// ErrNoPXEBlock is returned by [ParsePXEBlock] when the description has
 	// no closed <!--#pxe block.
@@ -108,6 +116,10 @@ type PXEBlock struct {
 	// Version pins the image version. Empty means "latest", which only
 	// applies at first provisioning. When set it matches ^[a-z0-9._-]+$.
 	Version string `yaml:"version"`
+
+	// Disk is the /dev/disk/by-id path a disk image is written to. It
+	// defaults to [DefaultPXEDisk].
+	Disk string `yaml:"disk"`
 }
 
 // ParsePXEBlock extracts the desired provisioning state from a Proxmox VM
@@ -117,9 +129,11 @@ type PXEBlock struct {
 //	<!--#pxe
 //	image: debian13        # required
 //	version: 2026.10.01    # optional
+//	disk: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0  # optional
 //	-->
 //
-// Unknown keys are rejected. It returns an error wrapping [ErrNoPXEBlock]
+// Unknown keys are rejected. disk must match
+// ^/dev/disk/by-id/[A-Za-z0-9._:-]+$ and defaults to [DefaultPXEDisk]. It returns an error wrapping [ErrNoPXEBlock]
 // when there is no closed block, and one wrapping [ErrInvalidPXEBlock] that
 // names the reason when the content is not valid YAML, image is missing or
 // either value is outside ^[a-z0-9._-]+$.
@@ -146,6 +160,10 @@ func ParsePXEBlock(description string) (PXEBlock, error) {
 		return PXEBlock{}, fmt.Errorf("%w: image %q must match %s", ErrInvalidPXEBlock, blk.Image, pxeNameRe)
 	case blk.Version != "" && !pxeNameRe.MatchString(blk.Version):
 		return PXEBlock{}, fmt.Errorf("%w: version %q must match %s", ErrInvalidPXEBlock, blk.Version, pxeNameRe)
+	case blk.Disk == "":
+		blk.Disk = DefaultPXEDisk
+	case !pxeDiskRe.MatchString(blk.Disk) || path.Base(blk.Disk) == "." || path.Base(blk.Disk) == "..":
+		return PXEBlock{}, fmt.Errorf("%w: disk %q must match %s", ErrInvalidPXEBlock, blk.Disk, pxeDiskRe)
 	}
 	return blk, nil
 }
