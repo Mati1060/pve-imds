@@ -41,6 +41,10 @@ ProtectSystem=strict
 ReadOnlyPaths=/etc/pve/qemu-server
 RuntimeDirectory=pve-imds
 RuntimeDirectoryMode=0750
+# /var/lib/pve-imds holds the live OS UKI served at /pxe/live.efi
+# (pxe.live_uki); pve-imds only reads it. Under DynamicUser it lives in
+# /var/lib/private/pve-imds with /var/lib/pve-imds as a symlink.
+StateDirectory=pve-imds
 MemoryDenyWriteExecute=yes
 UMask=0027
 

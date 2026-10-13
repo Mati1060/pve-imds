@@ -43,6 +43,8 @@ type Record struct {
 	SHA256 string
 	// ProvisionedAt is when provisioning finished.
 	ProvisionedAt time.Time
+	// Method is how the VM was provisioned: "disk" or "chain".
+	Method string
 }
 
 // Store reads and writes provisioning records.
@@ -118,8 +120,8 @@ func (s *Store) Get(ctx context.Context, uuid string) (rec Record, found bool, e
 			return "", fmt.Errorf("pxestate: field %s is not a string", field)
 		}
 	}
-	fields := make(map[string]string, 4)
-	for _, f := range []string{"image", "version", "sha256", "provisioned_at"} {
+	fields := make(map[string]string, 5)
+	for _, f := range []string{"image", "version", "sha256", "provisioned_at", "method"} {
 		v, err := str(f)
 		if err != nil {
 			return Record{}, false, err
@@ -131,6 +133,7 @@ func (s *Store) Get(ctx context.Context, uuid string) (rec Record, found bool, e
 		Image:   fields["image"],
 		Version: fields["version"],
 		SHA256:  fields["sha256"],
+		Method:  fields["method"],
 	}
 	if ts := fields["provisioned_at"]; ts != "" {
 		rec.ProvisionedAt, err = time.Parse(time.RFC3339, ts)
@@ -152,6 +155,7 @@ func (s *Store) Put(ctx context.Context, uuid string, rec Record) error {
 		"image":   rec.Image,
 		"version": rec.Version,
 		"sha256":  rec.SHA256,
+		"method":  rec.Method,
 	}
 	if !rec.ProvisionedAt.IsZero() {
 		data["provisioned_at"] = rec.ProvisionedAt.UTC().Format(time.RFC3339)

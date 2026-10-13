@@ -26,6 +26,7 @@ import (
 	"github.com/wyattanderson/pve-imds/internal/imds/pxe"
 	"github.com/wyattanderson/pve-imds/internal/logging"
 	"github.com/wyattanderson/pve-imds/internal/manager"
+	"github.com/wyattanderson/pve-imds/internal/provision"
 	"github.com/wyattanderson/pve-imds/internal/pxestate"
 	"github.com/wyattanderson/pve-imds/internal/tapwatch"
 	"github.com/wyattanderson/pve-imds/internal/userdata"
@@ -98,6 +99,11 @@ func initConfig(cfgFile string) error {
 	viper.SetDefault("secrets.cache_ttl", def.Secrets.CacheTTL)
 	viper.SetDefault("pxe.enabled", def.PXE.Enabled)
 	viper.SetDefault("pxe.state_path_template", def.PXE.StatePathTemplate)
+	viper.SetDefault("pxe.manifest_url", def.PXE.ManifestURL)
+	viper.SetDefault("pxe.manifest_ca_file", def.PXE.ManifestCAFile)
+	viper.SetDefault("pxe.manifest_ttl", def.PXE.ManifestTTL)
+	viper.SetDefault("pxe.live_uki", def.PXE.LiveUKI)
+	viper.SetDefault("pxe.chain_allowed_prefixes", def.PXE.ChainAllowedPrefixes)
 
 	if cfgFile == "" {
 		if _, err := os.Stat(defaultConfigFile); err != nil {
@@ -144,7 +150,11 @@ func runServe() error {
 	}
 	var pxeServer *pxe.Server
 	if pxeState != nil {
-		pxeServer = pxe.NewServer(logger, pxeState)
+		prov, err := provision.FromConfig(cfg.PXE, pxeState, pxe.LiveUKIPath, logger)
+		if err != nil {
+			return fmt.Errorf("configure pxe: %w", err)
+		}
+		pxeServer = pxe.NewServer(logger, prov, cfg.PXE.LiveUKI)
 	}
 
 	if info, ok := debug.ReadBuildInfo(); ok {
