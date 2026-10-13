@@ -143,6 +143,32 @@ qm set $VMID --smbios1 "uuid=$UUID,serial=$(echo -n "$SERIAL" | base64 -w0),base
 
 `h=` is optional; when set, it overrides the hostname from `meta-data`. The trailing `/` on the seed URL matters for older cloud-init releases; Talos and cloud-init 23.1+ add it if it is missing.
 
+### Static network config
+
+To give a VM a static address instead of DHCP, add a `<!--#network-config` block to its Notes, next to any `<!--#user-data` block. It holds a standard cloud-init [network config](https://docs.cloud-init.io/en/latest/reference/network-config.html), v1 or v2:
+
+```
+<!--#network-config
+network:
+  version: 2
+  ethernets:
+    net0:
+      match:
+        macaddress: "bc:24:11:00:00:01"
+      addresses:
+        - 192.168.1.10/24
+      routes:
+        - to: 0.0.0.0/0
+          via: 192.168.1.1
+      nameservers:
+        addresses: [192.168.1.1]
+-->
+```
+
+The block is served as written; `pve-imds` only checks that it is YAML with `version: 1` or `2`. If it isn't, the VM gets the DHCP default instead and the problem is logged with the VMID, so check `journalctl -u pve-imds` if a static address doesn't apply.
+
+### Talos
+
 With Talos, a VM without user-data gets its hostname and boots into maintenance mode, ready for `talosctl apply-config`. A VM with a machine config in its Notes boots straight into it. To keep the secrets in that config out of Notes, use templated user-data.
 
 Set `nocloud.enabled: false` to disable the endpoint.
@@ -187,6 +213,8 @@ bao kv put kv/pve-imds/pools/k8s-dmz-01/worker \
 - **`{tag}`** (e.g. `kv/data/pve-imds/tags/{tag}/{name}`): the VM tag that starts with `secrets.tag_prefix` (default `pve-imds-`), without the prefix and lowercased. A VM tagged `pve-imds-k8s-dmz-01` reads `kv/data/pve-imds/tags/k8s-dmz-01/<set>`. Other tags are ignored. A VM with no such tag, or with more than one, gets a 503.
 
   By default (`secrets.require_registered_tags: true`) the tag must also be listed in `registered-tags` in `/etc/pve/datacenter.cfg` (in the GUI under *Datacenter → Options*, or with `pvesh set /cluster/options --registered-tags 'pve-imds-k8s-dmz-01;...'`). Registered tags can only be set or removed by users with `Sys.Modify` on `/`. Without that, anyone with `VM.Config.Options` on any VM could tag it and read that scope's secrets. Turn the check off only if everyone who can edit VMs is trusted with all secrets.
+
+  `--registered-tags` replaces the whole list, so include the tags that are already registered (`pvesh get /cluster/options` shows them). Tags are matched case-insensitively, as in Proxmox, unless `tag-style` sets `case-sensitive=1`.
 
   Tag scoping fits well with [JWT-SVID](#jwt-svid-identity-tokens) roles that are bound to tags; register those tags for the same reason.
 
@@ -241,6 +269,40 @@ The service unit only allows IPv4 sockets. If OpenBao is only reachable over IPv
 [Service]
 RestrictAddressFamilies=AF_XDP AF_NETLINK AF_UNIX AF_INET AF_INET6
 ```
+
+### Setting it up
+
+On every Proxmox node that runs `pve-imds`:
+
+1. Run OpenBao Agent with a file sink that writes the token where the `pve-imds-token` group can read it, as above, and give its role a read-only policy for the secrets prefix (see [Security model](#security-model)).
+2. Enable templating in `/etc/pve-imds/config.yaml` (see [Configuration](#configuration)) and restart the service:
+
+   ```yaml
+   secrets:
+     enabled: true
+     address: https://openbao.example.com:8200
+     token_file: /run/openbao-agent-pve-imds/token
+     # for tag scoping, also:
+     # path_template: kv/data/pve-imds/tags/{tag}/{name}
+   ```
+
+   ```bash
+   systemctl restart pve-imds
+   journalctl -u pve-imds -n 20   # a bad secrets config stops the service from starting
+   ```
+
+Then, once per scope and VM:
+
+3. Store the secret set: `bao kv put kv/pve-imds/pools/<pool>/<set> field=value ...` (or `kv/pve-imds/tags/<scope>/<set>`).
+4. Put the VM in the pool, or register the scope tag and add it to the VM:
+
+   ```bash
+   pvesh set /pools --poolid <pool> --vms <VMID>  # pool scoping
+   qm set <VMID> --tags 'pve-imds-<scope>'        # tag scoping; replaces the VM's tags
+   ```
+
+5. Add `secrets=<set>` and the `{{ secret "<field>" }}` placeholders to the VM's `<!--#user-data` block.
+6. Check the result from inside the VM with `curl -i http://169.254.169.254/nocloud/user-data`. A 503 means rendering failed; the `pve-imds` log on the VM's node has the reason as `outcome` (for example `vm_not_in_pool`, `tag_not_registered` or `secret_fetch_failed`).
 
 ## PXE provisioning
 
@@ -339,6 +401,14 @@ pxe:
 ```
 
 `path_template` is the KV v2 API path, so it includes the mount's `data/` segment. It must contain `{name}` and exactly one of `{pool}` or `{tag}`. Secret sets are cached per scope and set for `cache_ttl`; errors are never cached.
+
+The configuration is read once at startup, so run `systemctl restart pve-imds` after changing it. The service runs as a dynamic user, so the file must be readable by other users (the default `0644` is fine; it holds no secrets) or by the `pve-imds-token` group. To use environment variables instead, add them in a drop-in with `systemctl edit pve-imds`:
+
+```ini
+[Service]
+Environment=PVE_IMDS_SECRETS_ENABLED=true
+Environment=PVE_IMDS_SECRETS_ADDRESS=https://openbao.example.com:8200
+```
 
 ## How it works
 
