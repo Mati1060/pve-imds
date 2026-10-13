@@ -217,3 +217,124 @@ func TestParseUserDataBlock_FollowedByNetworkConfig(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "network:\n  version: 2", nc)
 }
+
+// ---------------------------------------------------------------------------
+// ParsePXEBlock
+// ---------------------------------------------------------------------------
+
+func TestParsePXEBlock(t *testing.T) {
+	cases := []struct {
+		name    string
+		desc    string
+		want    PXEBlock
+		wantErr error
+	}{
+		{
+			name: "image only",
+			desc: "<!--#pxe\nimage: debian13\n-->",
+			want: PXEBlock{Image: "debian13"},
+		},
+		{
+			name: "image and version",
+			desc: "<!--#pxe\nimage: debian13\nversion: 2026.10.01\n-->",
+			want: PXEBlock{Image: "debian13", Version: "2026.10.01"},
+		},
+		{
+			name: "comments and surrounding text",
+			desc: "web server\n\n<!--#pxe\nimage: debian13 # required\nversion: 2026.10.01\n-->\nmore notes",
+			want: PXEBlock{Image: "debian13", Version: "2026.10.01"},
+		},
+		{
+			name: "numeric-looking values keep their text",
+			desc: "<!--#pxe\nimage: 13\nversion: 2026.10\n-->",
+			want: PXEBlock{Image: "13", Version: "2026.10"},
+		},
+		{
+			name: "empty version is unpinned",
+			desc: "<!--#pxe\nimage: debian13\nversion:\n-->",
+			want: PXEBlock{Image: "debian13"},
+		},
+		{
+			name: "coexists with user-data and network-config",
+			desc: "<!--#user-data\n#cloud-config\n-->\n<!--#pxe\nimage: debian13\n-->\n<!--#network-config\nnetwork:\n  version: 2\n-->",
+			want: PXEBlock{Image: "debian13"},
+		},
+		{
+			name:    "no block",
+			desc:    "just a plain description",
+			wantErr: ErrNoPXEBlock,
+		},
+		{
+			name:    "empty description",
+			desc:    "",
+			wantErr: ErrNoPXEBlock,
+		},
+		{
+			name:    "no closing tag",
+			desc:    "<!--#pxe\nimage: debian13\n",
+			wantErr: ErrNoPXEBlock,
+		},
+		{
+			name:    "empty block",
+			desc:    "<!--#pxe\n   \n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "missing image",
+			desc:    "<!--#pxe\nversion: 2026.10.01\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "unknown key",
+			desc:    "<!--#pxe\nimage: debian13\ndisk: scsi0\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "invalid yaml",
+			desc:    "<!--#pxe\nimage: [debian13\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "not a mapping",
+			desc:    "<!--#pxe\n- debian13\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "image with uppercase",
+			desc:    "<!--#pxe\nimage: Debian13\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "image with ipxe variable",
+			desc:    "<!--#pxe\nimage: ${net0/ip}\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "image with slash",
+			desc:    "<!--#pxe\nimage: ../debian13\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "version with space",
+			desc:    "<!--#pxe\nimage: debian13\nversion: \"2026 10\"\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+		{
+			name:    "image is a list",
+			desc:    "<!--#pxe\nimage:\n  - debian13\n-->",
+			wantErr: ErrInvalidPXEBlock,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParsePXEBlock(tc.desc)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				assert.Equal(t, PXEBlock{}, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
