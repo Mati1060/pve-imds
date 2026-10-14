@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/wyattanderson/pve-imds/internal/pxestate"
+	"github.com/wyattanderson/pve-imds/pkg/manifest"
 )
 
 // Outcomes of a decision, logged as "outcome".
@@ -36,6 +37,7 @@ const (
 	OutcomeChainOnce        = "chain_once"
 	OutcomeChainAlways      = "chain_always"
 	OutcomeChainNotAllowed  = "chain_not_allowed"
+	OutcomeImageURLError    = "image_url_error"
 )
 
 // Outcomes of [Provisioner.Done].
@@ -80,10 +82,20 @@ type StateStore interface {
 	Put(ctx context.Context, uuid string, rec pxestate.Record) error
 }
 
+// ImageBucket hands out access to disk images in a private bucket.
+// *s3.Bucket implements it.
+type ImageBucket interface {
+	// PresignGet returns a short-lived URL for the object at rawURL.
+	PresignGet(ctx context.Context, rawURL string) (string, error)
+}
+
 // Options configures a [Provisioner].
 type Options struct {
 	Manifests ManifestSource
 	State     StateStore
+	// Images, if non-nil, presigns the URL of every disk image job. Nil
+	// hands out the manifest URL as it is.
+	Images ImageBucket
 	// LiveUKI is the path of the live OS UKI. A disk image is only
 	// provisioned while it is readable.
 	LiveUKI string
@@ -218,7 +230,7 @@ func (p *Provisioner) Boot(ctx context.Context, uuid string, d Desired) (Plan, s
 		return plan, "#!ipxe\nchain " + p.opts.LiveUKIURL + "\n"
 
 	default:
-		if err := CheckChainURL(plan.Entry.URL, p.opts.ChainAllowedPrefixes); err != nil {
+		if err := manifest.CheckChainURL(plan.Entry.URL, p.opts.ChainAllowedPrefixes); err != nil {
 			plan.Outcome, plan.Err, plan.Provision = OutcomeChainNotAllowed, err, false
 			return plan, ExitScript
 		}
@@ -267,16 +279,28 @@ type Job struct {
 }
 
 // Job returns the disk image job for uuid's machine, resolved now. ok is
-// false unless the plan provisions a disk image; plan says why.
+// false unless the plan provisions a disk image; plan says why. With
+// [Options.Images] set, URL is presigned for this request only, so a live
+// OS that retries a download should fetch its job again; the URL must not
+// be logged.
 func (p *Provisioner) Job(ctx context.Context, uuid string, d Desired) (job Job, plan Plan, ok bool) {
 	plan = p.Plan(ctx, uuid, d)
 	if !plan.IsDiskProvision() {
 		return Job{}, plan, false
 	}
+	url := plan.Entry.URL
+	if p.opts.Images != nil {
+		signed, err := p.opts.Images.PresignGet(ctx, url)
+		if err != nil {
+			plan.Outcome, plan.Err, plan.Provision = OutcomeImageURLError, err, false
+			return Job{}, plan, false
+		}
+		url = signed
+	}
 	return Job{
 		Image:   plan.Image,
 		Version: plan.Version,
-		URL:     plan.Entry.URL,
+		URL:     url,
 		SHA256:  plan.Entry.SHA256,
 		Size:    plan.Entry.Size,
 		Disk:    d.Disk,

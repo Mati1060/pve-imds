@@ -44,6 +44,11 @@ func TestConfigDefaults(t *testing.T) {
 	assert.Equal(t, "/var/lib/pve-imds/live.efi", cfg.PXE.LiveUKI)
 	assert.Empty(t, cfg.PXE.ManifestURL)
 	assert.Empty(t, cfg.PXE.ChainAllowedPrefixes)
+	assert.Equal(t, config.PXEImagesConfig{
+		Region:          "default",
+		CredentialsPath: "kv/data/pve-imds/rgw-images",
+		URLLifetime:     15 * time.Minute,
+	}, cfg.PXE.Images)
 }
 
 func TestConfigFile(t *testing.T) {
@@ -70,6 +75,11 @@ pxe:
   chain_allowed_prefixes:
     - https://pxe.factory.talos.dev/pxe/
     - https://boot.example.com/
+  images:
+    bucket_url: https://rgw.example.com/pxe-images/
+    region: zg1
+    credentials_path: kv/data/x/rgw
+    url_lifetime: 5m
 `)
 	assert.False(t, cfg.NoCloud.Enabled)
 	assert.Equal(t, config.SecretsConfig{
@@ -94,6 +104,12 @@ pxe:
 			"https://pxe.factory.talos.dev/pxe/",
 			"https://boot.example.com/",
 		},
+		Images: config.PXEImagesConfig{
+			BucketURL:       "https://rgw.example.com/pxe-images/",
+			Region:          "zg1",
+			CredentialsPath: "kv/data/x/rgw",
+			URLLifetime:     5 * time.Minute,
+		},
 	}, cfg.PXE)
 }
 
@@ -105,6 +121,8 @@ func TestConfigEnv(t *testing.T) {
 	t.Setenv("PVE_IMDS_PXE_STATE_PATH_TEMPLATE", "kv/data/x/{uuid}")
 	t.Setenv("PVE_IMDS_PXE_MANIFEST_URL", "https://rgw.example.com/m.json")
 	t.Setenv("PVE_IMDS_PXE_CHAIN_ALLOWED_PREFIXES", "https://a.example.com/,https://b.example.com/")
+	t.Setenv("PVE_IMDS_PXE_IMAGES_BUCKET_URL", "https://rgw.example.com/b/")
+	t.Setenv("PVE_IMDS_PXE_IMAGES_URL_LIFETIME", "10m")
 	cfg := loadConfig(t, "")
 	assert.True(t, cfg.Secrets.Enabled)
 	assert.Equal(t, "ns1", cfg.Secrets.Namespace)
@@ -113,4 +131,6 @@ func TestConfigEnv(t *testing.T) {
 	assert.Equal(t, "kv/data/x/{uuid}", cfg.PXE.StatePathTemplate)
 	assert.Equal(t, "https://rgw.example.com/m.json", cfg.PXE.ManifestURL)
 	assert.Equal(t, []string{"https://a.example.com/", "https://b.example.com/"}, cfg.PXE.ChainAllowedPrefixes)
+	assert.Equal(t, "https://rgw.example.com/b/", cfg.PXE.Images.BucketURL)
+	assert.Equal(t, 10*time.Minute, cfg.PXE.Images.URLLifetime)
 }

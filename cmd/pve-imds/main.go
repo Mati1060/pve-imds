@@ -104,6 +104,10 @@ func initConfig(cfgFile string) error {
 	viper.SetDefault("pxe.manifest_ttl", def.PXE.ManifestTTL)
 	viper.SetDefault("pxe.live_uki", def.PXE.LiveUKI)
 	viper.SetDefault("pxe.chain_allowed_prefixes", def.PXE.ChainAllowedPrefixes)
+	viper.SetDefault("pxe.images.bucket_url", def.PXE.Images.BucketURL)
+	viper.SetDefault("pxe.images.region", def.PXE.Images.Region)
+	viper.SetDefault("pxe.images.credentials_path", def.PXE.Images.CredentialsPath)
+	viper.SetDefault("pxe.images.url_lifetime", def.PXE.Images.URLLifetime)
 
 	if cfgFile == "" {
 		if _, err := os.Stat(defaultConfigFile); err != nil {
@@ -150,7 +154,7 @@ func runServe() error {
 	}
 	var pxeServer *pxe.Server
 	if pxeState != nil {
-		prov, err := provision.FromConfig(cfg.PXE, pxeState, pxe.LiveUKIPath, logger)
+		prov, err := provision.FromConfig(cfg.PXE, cfg.Secrets, pxeState, pxe.LiveUKIPath, logger)
 		if err != nil {
 			return fmt.Errorf("configure pxe: %w", err)
 		}
