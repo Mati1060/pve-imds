@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/wyattanderson/pve-imds/pkg/manifest"
 )
 
 const (
@@ -42,6 +44,12 @@ type ManifestOptions struct {
 	TTL time.Duration
 	// ChainAllowedPrefixes are the URL prefixes chain images may use.
 	ChainAllowedPrefixes []string
+	// DiskURLPrefix, if non-empty, is the prefix every disk image URL must
+	// start with.
+	DiskURLPrefix string
+	// Sign, if non-nil, signs every manifest request, e.g. with
+	// [s3.Bucket.SignRequest].
+	Sign func(ctx context.Context, req *http.Request) error
 	// Log receives a warning for every skipped manifest entry.
 	Log *slog.Logger
 	// Timeout bounds a single fetch. Zero means 10s.
@@ -52,12 +60,13 @@ type ManifestOptions struct {
 // Errors are never cached, and an expired manifest is never served when a
 // fetch fails. Concurrent fetches share one request.
 type HTTPManifest struct {
-	url      string
-	ttl      time.Duration
-	prefixes []string
-	log      *slog.Logger
-	client   *http.Client
-	now      func() time.Time
+	url    string
+	ttl    time.Duration
+	parse  manifest.Options
+	sign   func(ctx context.Context, req *http.Request) error
+	log    *slog.Logger
+	client *http.Client
+	now    func() time.Time
 
 	group singleflight.Group
 
@@ -73,7 +82,7 @@ func NewHTTPManifest(opts ManifestOptions) (*HTTPManifest, error) {
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return nil, fmt.Errorf("provision: manifest_url %q must be an https URL", opts.URL)
 	}
-	if err := ValidateAllowedPrefixes(opts.ChainAllowedPrefixes); err != nil {
+	if err := manifest.ValidateAllowedPrefixes(opts.ChainAllowedPrefixes); err != nil {
 		return nil, err
 	}
 
@@ -103,10 +112,14 @@ func NewHTTPManifest(opts ManifestOptions) (*HTTPManifest, error) {
 	}
 
 	return &HTTPManifest{
-		url:      opts.URL,
-		ttl:      opts.TTL,
-		prefixes: opts.ChainAllowedPrefixes,
-		log:      log,
+		url: opts.URL,
+		ttl: opts.TTL,
+		parse: manifest.Options{
+			ChainAllowedPrefixes: opts.ChainAllowedPrefixes,
+			DiskURLPrefix:        opts.DiskURLPrefix,
+		},
+		sign: opts.Sign,
+		log:  log,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   timeout,
@@ -152,6 +165,11 @@ func (h *HTTPManifest) fetch(ctx context.Context) (*Manifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("provision: build manifest request: %w", err)
 	}
+	if h.sign != nil {
+		if err := h.sign(ctx, req); err != nil {
+			return nil, fmt.Errorf("provision: sign manifest request: %w", err)
+		}
+	}
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("provision: fetch manifest: %w", err)
@@ -169,7 +187,7 @@ func (h *HTTPManifest) fetch(ctx context.Context) (*Manifest, error) {
 		return nil, errors.New("provision: manifest is larger than 4 MiB")
 	}
 
-	m, skipped, err := ParseManifest(data, h.prefixes)
+	m, skipped, err := manifest.Parse(data, h.parse)
 	if err != nil {
 		return nil, err
 	}

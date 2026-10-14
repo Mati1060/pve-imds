@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -31,15 +32,17 @@ type fakeRGW struct {
 	body   string
 	status int
 	hits   int
+	auth   []string
 }
 
 func newFakeRGW(t *testing.T) *fakeRGW {
 	t.Helper()
 	f := &fakeRGW{body: manifestDoc}
-	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.hits++
+		f.auth = append(f.auth, r.Header.Get("Authorization"))
 		if f.status != 0 {
 			w.WriteHeader(f.status)
 			return
@@ -125,7 +128,7 @@ func TestHTTPManifestErrors(t *testing.T) {
 	}{
 		{name: "not found", status: http.StatusNotFound, want: "404"},
 		{name: "redirect", status: http.StatusFound, want: "302"},
-		{name: "malformed json", body: `{"images":`, want: "decode manifest"},
+		{name: "malformed json", body: `{"images":`, want: "manifest: decode"},
 		{name: "too large", body: `{"images": {}, "pad": "` + strings.Repeat("x", manifestMaxBytes) + `"}`, want: "larger than"},
 	}
 	for _, tc := range cases {
@@ -156,4 +159,32 @@ func TestNewHTTPManifestValidation(t *testing.T) {
 	require.ErrorContains(t, err, "must end with /")
 	_, err = NewHTTPManifest(ManifestOptions{URL: "https://rgw.example.com/m.json", CAFile: filepath.Join(t.TempDir(), "missing.pem")})
 	require.Error(t, err)
+}
+
+func TestHTTPManifestSignsAndRestrictsDiskURLs(t *testing.T) {
+	f := newFakeRGW(t)
+	src, _ := newSource(t, f, nil)
+	src.parse.DiskURLPrefix = "https://rgw.example.com/"
+	src.sign = func(_ context.Context, req *http.Request) error {
+		req.Header.Set("Authorization", "signed "+req.URL.Path)
+		return nil
+	}
+	m, err := src.Manifest(context.Background())
+	require.NoError(t, err)
+	assert.Contains(t, m.Images["debian13"].Versions, "1")
+	assert.Equal(t, []string{"signed /pxe/manifest.json"}, f.auth)
+
+	// A disk URL outside the bucket is skipped like any invalid entry.
+	f.set(0, strings.ReplaceAll(manifestDoc, "https://rgw.example.com/1.raw.zst", "https://other.example.com/1.raw.zst"))
+	src.cached = nil
+	m, err = src.Manifest(context.Background())
+	require.NoError(t, err)
+	assert.NotContains(t, m.Images, "debian13")
+
+	// A signing failure is a fetch failure; nothing is sent.
+	src.cached = nil
+	src.sign = func(context.Context, *http.Request) error { return errors.New("no keys") }
+	_, err = src.Manifest(context.Background())
+	require.ErrorContains(t, err, "no keys")
+	assert.Equal(t, 2, f.hits)
 }

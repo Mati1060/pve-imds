@@ -318,6 +318,45 @@ func TestPlanHasNoSideEffects(t *testing.T) {
 	assert.True(t, plan.IsDiskProvision(), "Plan does not check the live UKI")
 }
 
+type fakeBucket struct {
+	err  error
+	urls []string
+}
+
+func (f *fakeBucket) PresignGet(_ context.Context, rawURL string) (string, error) {
+	f.urls = append(f.urls, rawURL)
+	if f.err != nil {
+		return "", f.err
+	}
+	return rawURL + "?X-Amz-Signature=sig", nil
+}
+
+func TestJobPresignsImageURL(t *testing.T) {
+	b := &fakeBucket{}
+	p := newProvisioner(t, fakeManifests{m: testManifest()}, &fakeStore{}, liveUKI(t))
+	p.opts.Images = b
+
+	job, plan, ok := p.Job(context.Background(), testUUID, Desired{Image: "debian13", Disk: testDisk})
+	require.True(t, ok)
+	assert.Equal(t, OutcomeProvisionNew, plan.Outcome)
+	assert.Equal(t, debURL+"?X-Amz-Signature=sig", job.URL)
+	assert.Equal(t, []string{debURL}, b.urls)
+
+	// Not provisioning: nothing is signed.
+	b.urls = nil
+	_, _, ok = p.Job(context.Background(), testUUID, Desired{Image: "talos"})
+	require.False(t, ok)
+	assert.Empty(t, b.urls)
+
+	b.err = errors.New("openbao down")
+	job, plan, ok = p.Job(context.Background(), testUUID, Desired{Image: "debian13", Disk: testDisk})
+	require.False(t, ok)
+	assert.Equal(t, Job{}, job)
+	assert.Equal(t, OutcomeImageURLError, plan.Outcome)
+	assert.False(t, plan.Provision)
+	require.ErrorContains(t, plan.Err, "openbao down")
+}
+
 func TestJob(t *testing.T) {
 	p := newProvisioner(t, fakeManifests{m: testManifest()}, &fakeStore{}, liveUKI(t))
 

@@ -364,6 +364,20 @@ The manifest lists the images and their versions. `pve-imds` fetches it from `px
 - `latest` must be one of `versions`.
 - URLs must be `https`, without user info, `.` or `..` path segments, `$` or whitespace, so they are safe to put into an iPXE script.
 - Unknown keys are rejected. An invalid image or version is skipped and logged as a warning; the rest of the manifest is still used. An image whose `latest` is skipped is skipped as a whole. A manifest that isn't valid JSON of this shape is an error.
+- With a [private image bucket](#private-image-bucket), a disk `url` must also be in that bucket.
+
+Tools that write the manifest can validate it with the same code by importing `github.com/wyattanderson/pve-imds/pkg/manifest` and calling `manifest.Parse` with the same `chain_allowed_prefixes` and bucket URL; they should reject a manifest when any entry is skipped.
+
+### Private image bucket
+
+Disk images don't have to be public. With `pxe.images.bucket_url` set, the manifest and the images live in a private S3 bucket (such as a Ceph RGW bucket) and `pve-imds` reads the access keys of a read-only user from OpenBao:
+
+- The manifest is fetched with a SigV4-signed request. `manifest_url` must be in the bucket.
+- Every disk `url` in the manifest must be in the bucket; other disk entries are skipped.
+- `/pxe/job` returns a presigned URL for the image instead of the manifest's `url`. It is minted for each request and valid for `pxe.images.url_lifetime` (15 minutes by default). S3 checks the lifetime when a download starts, so a download may take longer. A live OS that retries a download should fetch `/pxe/job` again rather than reuse the old URL.
+- If the keys can't be read, `/pxe/job` answers `409` with outcome `image_url_error`.
+
+Signing is pure computation, so `pve-imds` never handles image data. The keys are re-read from OpenBao every 5 minutes, so rotating them needs no restart. Presigned URLs are never logged. Chain images are not affected.
 
 ### Recorded state
 
@@ -394,7 +408,7 @@ These only serve the VM the request comes from, like every other endpoint.
 | Endpoint | Response |
 |---|---|
 | `GET /pxe/live.efi` | The `live_uki` file (`application/octet-stream`, `Cache-Control: no-store`), read on every request so it can be replaced without a restart. Only while the VM's decision is to provision a disk image; otherwise `404`. |
-| `GET /pxe/job` | `{"image", "version", "url", "sha256", "size", "disk"}` for the version resolved now. Only while the VM's decision is to provision a disk image; otherwise `409` with `{"error", "outcome"}`. |
+| `GET /pxe/job` | `{"image", "version", "url", "sha256", "size", "disk"}` for the version resolved now; `url` is presigned with a [private image bucket](#private-image-bucket). Only while the VM's decision is to provision a disk image; otherwise `409` with `{"error", "outcome"}`. |
 | `POST /pxe/done` | Body `{"image", "version", "sha256"}`. `204` once recorded; `409` if `image` isn't the block's, `version` isn't the pinned one, or the version or `sha256` doesn't match the manifest; `503` with `Retry-After` if OpenBao or the manifest is unavailable; `400` for a malformed body. A repeated identical report is `204` without a new write. |
 
 No job state is kept between `/pxe/job` and `/pxe/done`: the report is checked against the Notes and the manifest as they are when it arrives. If `latest` moved while an unpinned VM was installing, the report of the older version is still accepted as long as that version is in the manifest.
@@ -436,6 +450,48 @@ bao kv delete kv/pve-imds/pxe/<uuid>
 
    `delete` is deliberately left out: deleting a record makes the VM reprovision on its next boot, so only an operator should be able to do that.
 
+4. Optionally, keep the images private (see [Private image bucket](#private-image-bucket)):
+
+   ```bash
+   # A bucket without public ACLs or policy, and a read-only user for pve-imds
+   radosgw-admin user create --uid pve-imds-images --display-name "pve-imds images (read-only)"
+   ```
+
+   Grant that user read access with a bucket policy:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Principal": {"AWS": ["arn:aws:iam:::user/pve-imds-images"]},
+       "Action": ["s3:GetObject"],
+       "Resource": ["arn:aws:s3:::pxe-images/*"]
+     }]
+   }
+   ```
+
+   Store its keys in OpenBao, with the field names `radosgw-admin` prints, and let `pve-imds` read them:
+
+   ```bash
+   bao kv put kv/pve-imds/rgw-images access_key=... secret_key=...
+   ```
+
+   ```hcl
+   path "kv/data/pve-imds/rgw-images" {
+     capabilities = ["read"]
+   }
+   ```
+
+   Then set the bucket and move `manifest_url` into it:
+
+   ```yaml
+   pxe:
+     manifest_url: https://rgw.example.com/pxe-images/manifest.json
+     images:
+       bucket_url: https://rgw.example.com/pxe-images/
+   ```
+
 The service unit only allows IPv4 sockets. If the manifest server is only reachable over IPv6, add `AF_INET6` with the same drop-in as for [OpenBao](#token-and-openbao-agent).
 
 ## Configuration
@@ -466,6 +522,11 @@ pxe:
   live_uki: /var/lib/pve-imds/live.efi  # live OS UKI served at /pxe/live.efi
   chain_allowed_prefixes:  # URL prefixes chain images may use; https, ending in /
     - https://pxe.factory.talos.dev/pxe/
+  images:                  # private image bucket (optional)
+    bucket_url: ""         # e.g. https://rgw.example.com/pxe-images/; https, ending in /; empty: no signing
+    region: default        # SigV4 region; RGW accepts its zonegroup name
+    credentials_path: kv/data/pve-imds/rgw-images  # API path below /v1/; fields access_key and secret_key
+    url_lifetime: 15m      # lifetime of presigned image URLs
 ```
 
 `PVE_IMDS_PXE_CHAIN_ALLOWED_PREFIXES` takes a comma-separated list.

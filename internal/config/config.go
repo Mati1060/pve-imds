@@ -89,6 +89,32 @@ type PXEConfig struct {
 	// ChainAllowedPrefixes are the URL prefixes chain images may use. Each
 	// must be https and end with "/". Default: none.
 	ChainAllowedPrefixes []string `mapstructure:"chain_allowed_prefixes"`
+	// Images configures a private S3 bucket for disk images and the
+	// manifest.
+	Images PXEImagesConfig `mapstructure:"images"`
+}
+
+// PXEImagesConfig configures a private S3 (Ceph RGW) bucket that holds the
+// manifest and the disk images. When BucketURL is set, the manifest is
+// fetched with signed requests, every disk image URL must be in the
+// bucket, and /pxe/job hands out short-lived presigned URLs. The access
+// keys are read from OpenBao with the connection settings of
+// [SecretsConfig].
+type PXEImagesConfig struct {
+	// BucketURL is the bucket's https URL ending in "/", e.g.
+	// https://rgw.example.com/pxe-images/. Empty disables signing: the
+	// manifest and images are fetched without credentials. Default: empty.
+	BucketURL string `mapstructure:"bucket_url"`
+	// Region is the SigV4 region. RGW accepts its zonegroup name. Default:
+	// "default".
+	Region string `mapstructure:"region"`
+	// CredentialsPath is the API path (below /v1/) of a KV v2 entry with
+	// the string fields access_key and secret_key of a read-only user.
+	// Default: kv/data/pve-imds/rgw-images.
+	CredentialsPath string `mapstructure:"credentials_path"`
+	// URLLifetime is how long a presigned image URL is valid. S3 only
+	// checks it when a download starts. Default: 15m.
+	URLLifetime time.Duration `mapstructure:"url_lifetime"`
 }
 
 // Config holds all pve-imds configuration.
@@ -138,6 +164,11 @@ func Default() Config {
 			StatePathTemplate: "kv/data/pve-imds/pxe/{uuid}",
 			ManifestTTL:       60 * time.Second,
 			LiveUKI:           "/var/lib/pve-imds/live.efi",
+			Images: PXEImagesConfig{
+				Region:          "default",
+				CredentialsPath: "kv/data/pve-imds/rgw-images",
+				URLLifetime:     15 * time.Minute,
+			},
 		},
 	}
 }
