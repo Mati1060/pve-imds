@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package userdata implements [imds.UserDataProvider]: it extracts the
 // <!--#user-data block from a VM's Notes and, when the block declares
 // secrets=<set>, renders its {{ secret "field" }} placeholders from the

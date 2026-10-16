@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package s3 signs S3 requests for objects in one private bucket, such as a
 // Ceph RGW bucket that holds disk images. It implements just enough AWS
 // Signature Version 4 for unauthenticated-payload GETs: signing a request's

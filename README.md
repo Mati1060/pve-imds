@@ -562,3 +562,17 @@ I have only tested this with VMs running on Proxmox 9 using `virtio` interfaces 
 ## AI disclosure
 
 This was not vibe-coded. I used Claude Code to author most of the code here, but by specifying exactly the architecture and approach that I personally designed as an experienced software and infrastructure engineer, and with thorough review. I could have written all of this on my own (and I did for the prototype), but this approach saved me a fuckton of time and enabled me to do things like write conformance tests that test `pve-imds` against `cloud-init`.
+
+## License
+
+This fork is distributed as a whole under the GNU Affero General Public License, version 3 or (at your option) any later version. See [LICENSE](LICENSE).
+
+It builds on [wyattanderson/pve-imds](https://github.com/wyattanderson/pve-imds), which is MIT licensed. The MIT license allows its code to be redistributed under the AGPL as part of this fork, provided its copyright and permission notice is kept; that notice is in [LICENSES/MIT.txt](LICENSES/MIT.txt).
+
+Each file says which applies in its `SPDX-License-Identifier` header:
+
+- `AGPL-3.0-or-later`: written for this fork.
+- `MIT AND AGPL-3.0-or-later`: upstream code with changes made in this fork.
+- No header: upstream code unchanged in this fork, still available under the MIT license.
+
+Because `pve-imds` is a network service, section 13 of the AGPL applies if you run a modified version for other users: you must offer them its source code.

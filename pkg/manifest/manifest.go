@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package manifest parses and validates the PXE image manifest: the JSON
 // document that lists the disk and chain images pve-imds can provision. It
 // is importable so that tools which write the manifest validate it with

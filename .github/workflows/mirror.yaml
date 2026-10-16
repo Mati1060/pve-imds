@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Mateusz Nowak
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 name: mirror
 
 # Mirrors all branches and tags to the self-hosted git server on every push

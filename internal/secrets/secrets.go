@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package secrets resolves named secret sets for templated user-data and
 // renders {{ secret "field" }} placeholders.
 //

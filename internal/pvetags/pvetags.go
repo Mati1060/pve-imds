@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package pvetags reads the cluster-wide tag settings from
 // /etc/pve/datacenter.cfg.
 //
