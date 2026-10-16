@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package pxestate records which image a VM was provisioned with. Records
 // live in an OpenBao/Vault KV v2 secrets engine, keyed by the VM's SMBIOS
 // UUID, so pve-imds never writes to Proxmox.

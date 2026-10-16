@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Wyatt Anderson
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: MIT AND AGPL-3.0-or-later
+
 // Package openstack implements an OpenStack Nova metadata-compatible IMDS server.
 //
 // URL structure served:

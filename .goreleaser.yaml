@@ -35,7 +35,7 @@ archives:
 
 nfpms:
   - maintainer: Wyatt Anderson <wanderson@gmail.com>
-    license: MIT
+    license: AGPL-3.0-or-later AND MIT
     homepage: https://github.com/wyattanderson/pve-imds
     description: >-
       An OpenStack and EC2 IMDS (Instance Metadata Service) compatible metadata
@@ -51,6 +51,14 @@ nfpms:
     contents:
       - src: release/linux/usr/lib/systemd/system/pve-imds.service
         dst: /usr/lib/systemd/system/pve-imds.service
+        file_info:
+          mode: 0644
+      - src: LICENSE
+        dst: /usr/share/doc/pve-imds/LICENSE
+        file_info:
+          mode: 0644
+      - src: LICENSES/MIT.txt
+        dst: /usr/share/doc/pve-imds/LICENSE.MIT
         file_info:
           mode: 0644
     scripts:

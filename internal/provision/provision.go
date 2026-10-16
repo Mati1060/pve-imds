@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package provision decides whether a machine should be provisioned and with
 // what, and validates what the provisioning live OS reports back. It takes
 // plain inputs (the desired state, the recorded state and the manifest) and

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Wyatt Anderson
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: MIT AND AGPL-3.0-or-later
+
 // Command imds-conformance-server is a test harness for the IMDS conformance
 // suites. It serves either an EC2-compatible or OpenStack-compatible IMDS over
 // a random TCP port using a hard-coded fake VM identity so that the Python

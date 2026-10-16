@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package nocloud implements the cloud-init NoCloud datasource over HTTP
 // ("nocloud-net"), as consumed by cloud-init and by Talos Linux's nocloud
 // platform.

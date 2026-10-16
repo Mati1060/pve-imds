@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package pxe serves the PXE provisioning endpoints for one tap interface.
 // It only maps the VM behind the interface to the inputs of
 // [provision.Provisioner]; the decisions are made there.

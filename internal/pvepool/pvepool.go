@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package pvepool resolves which Proxmox resource pool a VM belongs to.
 //
 // Pool membership is not stored in the VM config but in /etc/pve/user.cfg,

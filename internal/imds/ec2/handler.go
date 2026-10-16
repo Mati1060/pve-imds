@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Wyatt Anderson
+// SPDX-FileCopyrightText: 2026 Mateusz Nowak
+// SPDX-License-Identifier: MIT AND AGPL-3.0-or-later
+
 // Package ec2 implements an EC2-compatible IMDS server.
 package ec2
 
